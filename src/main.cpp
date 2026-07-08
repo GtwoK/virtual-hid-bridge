@@ -512,7 +512,7 @@ int main(int argc, char** argv) {
 
   const int udp_socket = make_listener(bind_host, listen_port);
   if (udp_socket < 0) {
-    std::cerr << "could not bind VHBP UDP " << bind_host << ':'
+    std::cerr << "could not bind VHID UDP " << bind_host << ':'
               << listen_port << '\n';
     return 1;
   }
@@ -526,7 +526,7 @@ int main(int argc, char** argv) {
       return 2;
     }
     if (!send_source_hello(udp_socket, udp_source)) {
-      std::cerr << "warning: VHB2 HELLO to " << udp_source.label
+      std::cerr << "warning: UDP transport HELLO to " << udp_source.label
                 << " failed: " << std::strerror(errno) << '\n';
     }
   }
@@ -546,10 +546,10 @@ int main(int argc, char** argv) {
       std::cerr << "physical HID input unavailable: " << error << '\n';
   }
 
-  std::cout << "VHBP listening on UDP " << bind_host << ':' << listen_port
+  std::cout << "VHID UDP listening on " << bind_host << ':' << listen_port
             << (dry_run ? " (dry run)" : "") << '\n';
   if (udp_source.enabled) {
-    std::cout << "sending VHB2 HELLO to UDP source " << udp_source.label
+    std::cout << "sending UDP transport HELLO to source " << udp_source.label
               << " once per second";
     if (!bind_explicit) std::cout << " (auto-bound to 0.0.0.0)";
     std::cout << '\n';
@@ -583,7 +583,7 @@ int main(int argc, char** argv) {
     }
     if (udp_source.enabled && now_us() - udp_source.last_hello_us > 1'000'000) {
       if (!send_source_hello(udp_socket, udp_source)) {
-        std::cerr << "warning: VHB2 HELLO to " << udp_source.label
+        std::cerr << "warning: UDP transport HELLO to " << udp_source.label
                   << " failed: " << std::strerror(errno) << '\n';
       }
     }

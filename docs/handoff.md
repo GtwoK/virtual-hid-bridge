@@ -15,7 +15,8 @@ clients and eventually GameController-aware software can see.
 - CMake project with C++20/Objective-C++.
 - `vhid-bridge`: command-line bridge.
 - `vhid-bridge-ui.app`: basic AppKit UI that launches the bridge executable.
-- UDP VHB2 receiver for raw HID descriptors/reports and semantic state.
+- UDP HID-over-UDP receiver for raw HID descriptors/reports and semantic state.
+- C-compatible UDP sender helpers in `include/vhid/wire.h`.
 - Physical HID source using `IOHIDManager`.
 - Generic virtual HID profile builder.
 - macOS virtual-device backend in `src/virtual_device_macos.mm`.
@@ -64,7 +65,7 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-For AMFI-disabled testing:
+For local entitlement testing:
 
 ```sh
 codesign --force --sign - --entitlements vhid.entitlements build/vhid-bridge

@@ -6,6 +6,7 @@
 #include "vhid/hid_profile.h"
 #include "vhid/mapping.h"
 #include "vhid/protocol.h"
+#include "vhid/wire.h"
 
 namespace {
 
@@ -84,6 +85,64 @@ void protocol_test() {
   assert(parsed_report.data.size() == sizeof(report_bytes));
 }
 
+void wire_helper_test() {
+  const uint8_t descriptor[] = {
+      0x05, 0x01, 0x09, 0x05, 0xA1, 0x01,
+      0x05, 0x09, 0x19, 0x01, 0x29, 0x01,
+      0x15, 0x00, 0x25, 0x01, 0x75, 0x01,
+      0x95, 0x01, 0x81, 0x02, 0x75, 0x07,
+      0x95, 0x01, 0x81, 0x03, 0xC0,
+  };
+  vhid_sender_t sender{};
+  vhid_sender_init(&sender, 123);
+  uint8_t packet[VHID_MAX_DATAGRAM_SIZE]{};
+  vhid_hid_device_info_t device{};
+  device.vendor_id = 0x1209;
+  device.product_id = 0x5342;
+  device.version_number = 1;
+  device.transport = VHID_TRANSPORT_NETWORK;
+  device.flags = VHID_DEVICE_ALLOW_TRANSPARENT_OUTPUT;
+  device.report_descriptor = descriptor;
+  device.report_descriptor_size = sizeof(descriptor);
+  device.product = "Wire Helper Controller";
+  device.manufacturer = "VHID";
+  device.serial = "wire-1";
+
+  size_t size =
+      vhid_make_hid_device_add(&sender, &device, 10, packet, sizeof(packet));
+  assert(size);
+  vhid::ParsedMessage parsed;
+  assert(vhid::parse_message(std::span<const uint8_t>(packet, size), parsed));
+  assert(parsed.header->device_id == 123);
+  assert(parsed.header->sequence == 0);
+  vhid::ParsedHidDeviceAdd parsed_device;
+  assert(vhid::parse_hid_device_add(parsed.payload, parsed_device));
+  assert(parsed_device.product == "Wire Helper Controller");
+  assert(parsed_device.descriptor.size() == sizeof(descriptor));
+
+  const uint8_t report_bytes[] = {1};
+  size = vhid_make_hid_input_report(&sender, 7, report_bytes,
+                                    sizeof(report_bytes), 20, packet,
+                                    sizeof(packet));
+  assert(size);
+  assert(vhid::parse_message(std::span<const uint8_t>(packet, size), parsed));
+  assert(parsed.header->type ==
+         static_cast<uint8_t>(vhid::MessageType::hid_input_report));
+  assert(parsed.header->sequence == 1);
+  vhid::ParsedHidReport parsed_report;
+  assert(vhid::parse_hid_report(parsed.payload, parsed_report));
+  assert(parsed_report.header->report_id == 7);
+  assert(parsed_report.data.size() == sizeof(report_bytes));
+  assert(parsed_report.data[0] == report_bytes[0]);
+
+  size = vhid_make_hid_device_remove(&sender, 30, packet, sizeof(packet));
+  assert(size == sizeof(vhid_message_header_t));
+  assert(vhid::parse_message(std::span<const uint8_t>(packet, size), parsed));
+  assert(parsed.header->type ==
+         static_cast<uint8_t>(vhid::MessageType::hid_device_remove));
+  assert(parsed.header->sequence == 2);
+}
+
 void mapping_test() {
   vhid::InputState source{};
   source.buttons = (uint64_t{1} << 0) | (uint64_t{1} << 20);
@@ -133,6 +192,7 @@ void profile_test() {
 
 int main() {
   protocol_test();
+  wire_helper_test();
   mapping_test();
   profile_test();
   std::cout << "VHID core protocol, mapping, calibration, descriptor, and "

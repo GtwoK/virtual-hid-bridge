@@ -11,10 +11,10 @@
 
 namespace vhid {
 
-// Virtual HID Bridge Protocol (VHBP), version 2. All integer and IEEE-754
-// fields are little-endian. UDP is the first transport, but framing is
-// transport-neutral so the same messages can ride USB CDC or a stream framing
-// layer later.
+// HID-over-UDP envelope, version 2. All integer and IEEE-754 fields are
+// little-endian. UDP is the first transport, but the envelope is
+// transport-neutral so the same HID lifecycle messages can ride USB CDC or a
+// stream framing layer later.
 constexpr uint32_t kWireMagic = 0x32424856u;  // "VHB2" in little-endian memory.
 constexpr uint8_t kWireVersion = 2;
 constexpr uint16_t kDefaultUdpPort = 48660;
@@ -34,7 +34,8 @@ enum class MessageType : uint8_t {
   ping = 8,
   pong = 9,
   // Optional convenience source for software that has logical controls but
-  // no HID descriptor/reports of its own. Raw HID is the primary wire format.
+  // no HID descriptor/reports of its own. Raw HID remains the primary sender
+  // model.
   semantic_device_add = 10,
   semantic_input_state = 11,
 };

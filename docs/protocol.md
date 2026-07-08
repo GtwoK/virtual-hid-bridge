@@ -1,11 +1,35 @@
-# VHB2 protocol notes
+# HID-over-UDP Transport Notes
 
-Virtual HID Bridge Protocol v2, or VHB2, is a thin framing layer around standard
-HID artifacts. It is not a replacement for HID descriptors and reports.
+The UDP transport is meant to feel like HID plus lifecycle calls:
+
+1. add a controller with its HID report descriptor and identity;
+2. send ordinary HID input reports;
+3. remove the controller when it disappears.
+
+VHB2 is the internal wire version for the small envelope around those HID
+artifacts. It is not a replacement for HID descriptors and reports, and sender
+code should not need to treat it as a new controller format.
 
 All multi-byte fields are little-endian. The canonical C++ definitions are in
 `include/vhid/protocol.h`; the small C-compatible sender header is
 `include/vhid/wire.h`.
+
+## Sender-facing API
+
+Small C/C++ senders should prefer the helper functions in `include/vhid/wire.h`
+instead of constructing the envelope by hand:
+
+```c
+vhid_sender_t sender;
+vhid_sender_init(&sender, device_id);
+vhid_make_hid_device_add(&sender, &device, timestamp_us, packet, sizeof(packet));
+vhid_make_hid_input_report(&sender, report_id, report, report_size,
+                           timestamp_us, packet, sizeof(packet));
+vhid_make_hid_device_remove(&sender, timestamp_us, packet, sizeof(packet));
+```
+
+The caller still owns the UDP socket. Each helper returns the datagram size to
+send, or `0` if the packet would be invalid or too large.
 
 ## Message lifecycle
 
@@ -36,6 +60,8 @@ identity for profile recall.
 
 `hid_input_report`, `hid_output_report`, `hid_get_report` and
 `hid_get_report_response` all carry a `HidReportHeader` plus raw report bytes.
+The descriptor and identity from `hid_device_add` are not repeated on every
+input report.
 
 The report ID is carried in the header. The report payload does not include a
 report-ID prefix. For report-ID-less devices, the report ID is `0`.
@@ -60,5 +86,5 @@ That is the next large backend milestone.
 
 ## Security status
 
-UDP pairing/authentication is not implemented yet. Treat VHB2-over-UDP as a
+UDP pairing/authentication is not implemented yet. Treat HID-over-UDP as a
 trusted-lab transport for now.

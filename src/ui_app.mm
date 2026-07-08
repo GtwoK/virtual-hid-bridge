@@ -216,7 +216,7 @@
                            frame:NSMakeRect(20, 530, 940, 22)];
   [content addSubview:self.statusLabel];
 
-  NSTextField* hint = [self label:@"AMFI-disabled/ad-hoc entitlement testing still requires signing the bridge executable, not just this UI app."
+  NSTextField* hint = [self label:@"Virtual HID publishing requires signing the bridge executable with the entitlement, not just this UI app."
                             frame:NSMakeRect(20, 506, 940, 22)];
   hint.textColor = NSColor.secondaryLabelColor;
   [content addSubview:hint];

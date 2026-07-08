@@ -21,13 +21,16 @@ Bluetooth Classic HID and BLE HID-over-GATT both arrive in macOS's HID stack
 after pairing. Vendor-specific devices can still require initialization,
 feature reports, calibration reads or proprietary motion/output parsing.
 
-USB CDC, USB vendor-class endpoints and UDP offer no HID descriptor. They need
-an explicit application protocol or adapter.
+USB CDC, USB vendor-class endpoints and UDP offer no HID descriptor by
+themselves. They need a small transport envelope or adapter around the HID
+artifacts.
 
-## Public network format
+## HID-over-UDP Transport
 
-The primary wire contract transports standard HID artifacts inside a small
-framing envelope:
+The public sender model is HID lifecycle calls plus HID reports. A sender adds a
+controller with a descriptor and identity, sends input reports, and removes the
+controller when it disappears. The versioned bytes on the socket are just the
+current wire envelope for those calls:
 
 - `hid_device_add`: stable ID, identity properties and complete HID report
   descriptor
@@ -38,17 +41,18 @@ framing envelope:
 - `hello`, `ping`, `pong`: discovery/liveness foundation
 
 The report ID is carried separately and the report payload never includes an
-ID prefix. Descriptors travel at device creation; realtime packets contain
-only the thin framing header and report bytes. Complete input reports use
-latest-value-wins semantics, while lifecycle and output remain ordered.
+ID prefix. Descriptors travel at device creation; realtime packets contain only
+the controller ID, report metadata, sequencing/timestamp fields and report
+bytes. Complete input reports use latest-value-wins semantics, while lifecycle
+and output remain ordered.
 
 An optional semantic device/state message remains available for software that
 generates abstract controls but has no HID descriptor. It feeds the internal
 mapping model; it is not the universal wire representation.
 
-The framing remains necessary because HID itself does not define network
+The envelope remains necessary because HID itself does not define network
 device lifecycle, addressing, sequencing, timestamps or report return paths.
-No adopted network format supplies those pieces for arbitrary HID:
+No adopted network transport supplies those pieces for arbitrary HID:
 
 - DSU/Cemuhook is useful for emulator adapters, but has a fixed controller
   shape and no rumble return path.

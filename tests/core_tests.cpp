@@ -179,6 +179,9 @@ void profile_test() {
   auto profile = vhid::make_profile(description);
   assert(profile);
   assert(!profile->properties().report_descriptor.empty());
+  assert(profile->properties().primary_usage_page == 0x01);
+  assert(profile->properties().primary_usage == 0x05);
+  assert(profile->properties().vendor_id_source == 1);
   vhid::InputState state{};
   state.buttons = 5;
   state.axes[0] = INT16_MIN;
@@ -209,6 +212,9 @@ void switch_profile_test() {
   assert(properties.manufacturer == "Nintendo Co., Ltd.");
   assert(properties.serial == "switch-pro-test");
   assert(properties.transport == "USB");
+  assert(properties.primary_usage_page == 0x01);
+  assert(properties.primary_usage == 0x04);
+  assert(properties.vendor_id_source == 1);
   assert(properties.report_descriptor.size() == 203);
 
   vhid::InputState neutral{};

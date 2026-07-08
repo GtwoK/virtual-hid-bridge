@@ -40,18 +40,21 @@ The command-line bridge is `build/vhid-bridge`. The UI app bundle is
 bundled helper by default.
 
 For local entitlement testing, build the signing target after each build. It
-ad-hoc signs the bundled helper with the included entitlement, then signs the
-app bundle. Production distribution requires an Apple-authorized provisioning
-profile for `com.apple.developer.hid.virtual.device` and a real signing
-identity/profile pair.
+ad-hoc signs both `build/vhid-bridge` and the bundled helper with the included
+entitlement, then signs the app bundle. Production distribution requires an
+Apple-authorized provisioning profile for
+`com.apple.developer.hid.virtual.device` and a real signing identity/profile
+pair.
 
 ```sh
 cmake --build build --target vhid-sign-local
 ```
 
-If you run `build/vhid-bridge` directly from Terminal instead of through the
-app, that standalone executable still needs to be signed with the virtual HID
-entitlement separately.
+The standalone terminal helper and the app-bundled helper are separate files.
+Run `cmake --build build --target vhid-sign-local` again after rebuilding either
+one. On a Mac that is not authorized for the restricted virtual HID entitlement,
+macOS may still terminate the signed helper at launch even though
+`codesign --verify` succeeds.
 
 ## Run from Terminal
 
@@ -87,6 +90,10 @@ Useful options:
 --udp-source HOST   Send a UDP transport HELLO to a source, HOST[:PORT]
 --output-profile P  Select semantic output: generic, standard-gamepad, switch-pro
 ```
+
+`--output-profile` currently applies to physical HID sources and semantic UDP
+sources. Raw transparent HID-over-UDP sources still need a descriptor decoder
+before they can be converted into a different output profile.
 
 Virtual-device identity overrides are available from both Terminal and the UI:
 

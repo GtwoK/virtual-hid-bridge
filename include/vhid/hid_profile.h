@@ -16,6 +16,9 @@ struct HidDeviceProperties {
   uint16_t vendor_id = 0;
   uint16_t product_id = 0;
   uint16_t version_number = 1;
+  uint16_t primary_usage_page = 0;
+  uint16_t primary_usage = 0;
+  uint32_t vendor_id_source = 0;
   std::string product;
   std::string manufacturer;
   std::string serial;

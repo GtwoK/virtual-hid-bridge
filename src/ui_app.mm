@@ -512,11 +512,12 @@
   }
 
   NSArray<NSTextCheckingResult*>* reportMatches =
-      [self matches:@"device ([0-9]+): .*report" line:line];
+      [self matches:@"device ([0-9]+): .*report ([0-9]+)" line:line];
   if (reportMatches.count) {
     NSTextCheckingResult* match = reportMatches.firstObject;
     NSString* deviceId = [line substringWithRange:[match rangeAtIndex:1]];
     DeviceRow* device = [self deviceForId:deviceId create:YES];
+    device.inputCount = [line substringWithRange:[match rangeAtIndex:2]];
     device.lastEvent = line;
     [self.tableView reloadData];
   }

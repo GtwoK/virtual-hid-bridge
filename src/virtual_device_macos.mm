@@ -1,6 +1,7 @@
 #include "vhid/hid_profile.h"
 
 #include <CoreFoundation/CoreFoundation.h>
+#include <IOKit/hid/IOHIDDeviceKeys.h>
 #include <IOKit/hid/IOHIDKeys.h>
 #include <IOKit/hidsystem/IOHIDUserDevice.h>
 #include <mach/mach_time.h>
@@ -25,6 +26,27 @@ void set_string(CFMutableDictionaryRef dictionary, CFStringRef key,
   if (!string) return;
   CFDictionarySetValue(dictionary, key, string);
   CFRelease(string);
+}
+
+void set_usage_metadata(CFMutableDictionaryRef dictionary,
+                        uint16_t usage_page, uint16_t usage) {
+  if (!usage_page || !usage) return;
+  set_number(dictionary, CFSTR(kIOHIDPrimaryUsagePageKey), usage_page);
+  set_number(dictionary, CFSTR(kIOHIDPrimaryUsageKey), usage);
+  set_number(dictionary, CFSTR(kIOHIDDeviceUsagePageKey), usage_page);
+  set_number(dictionary, CFSTR(kIOHIDDeviceUsageKey), usage);
+
+  CFMutableDictionaryRef pair = CFDictionaryCreateMutable(
+      kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks,
+      &kCFTypeDictionaryValueCallBacks);
+  set_number(pair, CFSTR(kIOHIDDeviceUsagePageKey), usage_page);
+  set_number(pair, CFSTR(kIOHIDDeviceUsageKey), usage);
+  const void* values[] = {pair};
+  CFArrayRef pairs =
+      CFArrayCreate(kCFAllocatorDefault, values, 1, &kCFTypeArrayCallBacks);
+  CFDictionarySetValue(dictionary, CFSTR(kIOHIDDeviceUsagePairsKey), pairs);
+  CFRelease(pairs);
+  CFRelease(pair);
 }
 
 class MacVirtualDevice final : public VirtualDevice {
@@ -95,6 +117,11 @@ std::unique_ptr<VirtualDevice> VirtualDevice::create_raw(
   set_number(dictionary, CFSTR(kIOHIDProductIDKey), properties.product_id);
   set_number(dictionary, CFSTR(kIOHIDVersionNumberKey),
              properties.version_number);
+  if (properties.vendor_id_source)
+    set_number(dictionary, CFSTR(kIOHIDVendorIDSourceKey),
+               static_cast<int32_t>(properties.vendor_id_source));
+  set_usage_metadata(dictionary, properties.primary_usage_page,
+                     properties.primary_usage);
   set_string(dictionary, CFSTR(kIOHIDProductKey), properties.product);
   set_string(dictionary, CFSTR(kIOHIDManufacturerKey),
              properties.manufacturer);

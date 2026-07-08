@@ -38,6 +38,8 @@ clients and eventually GameController-aware software can see.
 - Switch 1 Pro host-output handling is incomplete; USB init reports,
   subcommand replies, SPI calibration reads and real HD rumble decoding are
   still follow-up work.
+- Raw HID sources cannot yet be converted into selected output profiles; they
+  need a descriptor decoder first, otherwise they remain transparent HID only.
 - Raw-HID transparent publication is implemented only when the source opts in.
 - UDP transport is unauthenticated.
 - Descriptor fragmentation and reliable lifecycle acknowledgements are not
@@ -85,7 +87,7 @@ open build/vhid-bridge-ui.app
 ```
 
 The UI app embeds `Contents/MacOS/vhid-bridge` and points at that helper by
-default. The signing target ad-hoc signs the bundled helper with
-`vhid.entitlements`, then signs the app bundle. Running the standalone
-`build/vhid-bridge` executable directly still requires signing that executable
-separately.
+default. The signing target ad-hoc signs both `build/vhid-bridge` and the
+bundled helper with `vhid.entitlements`, then signs the app bundle. On Macs
+without an authorized virtual HID entitlement path, the signed helper can still
+be killed at launch even when `codesign --verify` succeeds.

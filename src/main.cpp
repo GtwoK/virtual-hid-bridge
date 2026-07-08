@@ -4,6 +4,7 @@
 #include <cerrno>
 #include <chrono>
 #include <csignal>
+#include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
@@ -38,6 +39,37 @@ uint64_t now_us() {
 
 void request_stop(int) {
   stop_requested = 1;
+}
+
+const char* profile_name(vhid::DeviceProfile profile) {
+  switch (profile) {
+    case vhid::DeviceProfile::generic:
+      return "generic";
+    case vhid::DeviceProfile::standard_gamepad:
+      return "standard-gamepad";
+    case vhid::DeviceProfile::switch_pro:
+      return "switch-pro";
+    case vhid::DeviceProfile::switch_2_pro:
+      return "switch-2-pro";
+    case vhid::DeviceProfile::dualshock_4:
+      return "dualshock-4";
+    case vhid::DeviceProfile::dualsense:
+      return "dualsense";
+    case vhid::DeviceProfile::xbox:
+      return "xbox";
+  }
+  return "unknown";
+}
+
+const char* profile_name(uint8_t profile) {
+  return profile_name(static_cast<vhid::DeviceProfile>(profile));
+}
+
+std::string vid_pid_string(const vhid::HidDeviceProperties& properties) {
+  char buffer[10];
+  std::snprintf(buffer, sizeof(buffer), "%04x:%04x", properties.vendor_id,
+                properties.product_id);
+  return buffer;
 }
 
 struct Route {
@@ -111,6 +143,8 @@ struct Controller {
   vhid::ControllerMapping mapping = vhid::ControllerMapping::identity();
   std::shared_ptr<vhid::HidProfile> profile;
   std::unique_ptr<vhid::VirtualDevice> device;
+  uint64_t input_count = 0;
+  uint64_t next_input_log_us = 0;
   uint32_t last_sequence = 0;
   bool have_sequence = false;
   bool raw_hid = false;
@@ -151,7 +185,11 @@ class Runtime {
     }
     controllers_[id] = std::move(controller);
     std::cout << "device " << id << " added: "
-              << properties.product << " ("
+              << properties.product << " (profile "
+              << profile_name(effective_description.requested_profile)
+              << ", vid:pid " << vid_pid_string(properties)
+              << ", descriptor "
+              << properties.report_descriptor.size() << " bytes; "
               << unsigned(effective_description.button_count) << " buttons, "
               << unsigned(effective_description.hat_count) << " hats, "
               << unsigned(effective_description.axis_count) << " axes)\n";
@@ -161,6 +199,15 @@ class Runtime {
   bool add_raw(uint32_t id, const vhid::ParsedHidDeviceAdd& source,
                const Route& route) {
     std::lock_guard lock(mutex_);
+    if (overrides_.profile_set) {
+      std::cerr
+          << "device " << id << ": --output-profile "
+          << profile_name(overrides_.profile)
+          << " cannot be applied to a raw transparent HID source yet; "
+             "raw sources need a descriptor decoder before profile "
+             "conversion\n";
+      return false;
+    }
     if (!(source.header->flags & vhid::kHidAllowTransparentOutput)) {
       std::cerr
           << "device " << id
@@ -230,6 +277,7 @@ class Runtime {
             vhid::apply_mapping(state, controller.mapping));
     if (controller.device && !controller.device->send(report))
       std::cerr << "device " << id << ": failed to dispatch HID report\n";
+    log_input_progress(id, controller, "input");
   }
 
   void raw_input(uint32_t id, uint32_t sequence,
@@ -255,9 +303,21 @@ class Runtime {
     report.insert(report.end(), source.data.begin(), source.data.end());
     if (controller.device && !controller.device->send(report))
       std::cerr << "device " << id << ": failed to dispatch raw HID report\n";
+    log_input_progress(id, controller, "raw HID input");
   }
 
  private:
+  void log_input_progress(uint32_t id, Controller& controller,
+                          const char* kind) {
+    const uint64_t count = ++controller.input_count;
+    const uint64_t timestamp = now_us();
+    if (count == 1 || timestamp >= controller.next_input_log_us) {
+      controller.next_input_log_us = timestamp + 1'000'000;
+      std::cout << "device " << id << ": " << kind << " report "
+                << count << '\n';
+    }
+  }
+
   vhid::VirtualDevice::RawReportHandler raw_output_handler(
       uint32_t id, Route route) {
     return [this, id, route](vhid::HidReportType type, uint8_t report_id,
@@ -456,6 +516,8 @@ void usage(const char* name) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  std::cout.setf(std::ios::unitbuf);
+  std::cerr.setf(std::ios::unitbuf);
   std::signal(SIGINT, request_stop);
   std::signal(SIGTERM, request_stop);
   std::string bind_host = "127.0.0.1";

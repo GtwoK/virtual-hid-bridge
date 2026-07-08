@@ -61,6 +61,9 @@ if(CODESIGN_EXECUTABLE)
     add_custom_target(vhid-sign-local
         COMMAND ${CODESIGN_EXECUTABLE} --force --sign ${VHID_CODE_SIGN_IDENTITY}
             --entitlements ${CMAKE_SOURCE_DIR}/vhid.entitlements
+            $<TARGET_FILE:vhid-bridge>
+        COMMAND ${CODESIGN_EXECUTABLE} --force --sign ${VHID_CODE_SIGN_IDENTITY}
+            --entitlements ${CMAKE_SOURCE_DIR}/vhid.entitlements
             $<TARGET_BUNDLE_DIR:vhid-bridge-ui>/Contents/MacOS/vhid-bridge
         COMMAND ${CODESIGN_EXECUTABLE} --force --sign ${VHID_CODE_SIGN_IDENTITY}
             $<TARGET_BUNDLE_DIR:vhid-bridge-ui>

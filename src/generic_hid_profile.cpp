@@ -44,6 +44,9 @@ class GenericHidProfile final : public HidProfile {
         description.product_id ? description.product_id : 0x5342;
     properties_.version_number =
         description.version_number ? description.version_number : 1;
+    properties_.primary_usage_page = 0x01;
+    properties_.primary_usage = 0x05;
+    properties_.vendor_id_source = 1;
     properties_.product = bounded_string(description.product,
                                          sizeof(description.product),
                                          "Virtual HID Gamepad");

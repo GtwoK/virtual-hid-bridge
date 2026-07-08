@@ -98,6 +98,9 @@ class SwitchProProfile final : public HidProfile {
     properties_.vendor_id = 0x057E;
     properties_.product_id = 0x2009;
     properties_.version_number = 0x0210;
+    properties_.primary_usage_page = 0x01;
+    properties_.primary_usage = 0x04;
+    properties_.vendor_id_source = 1;
     properties_.product = "Pro Controller";
     properties_.manufacturer = "Nintendo Co., Ltd.";
     properties_.serial = bounded_string(description.serial,

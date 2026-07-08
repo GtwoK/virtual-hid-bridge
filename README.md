@@ -13,16 +13,18 @@ This is an early but testable foundation:
 - one logical device per sender-provided device ID
 - generated generic HID gamepads with configurable buttons, hats, axes,
   battery, vendor-defined motion and rumble output
+- an initial Switch 1 Pro Controller output profile with Nintendo identity,
+  report descriptor and standard `0x30` input report encoding
 - mapping/calibration core and unit tests
 - an entitlement-sensitive macOS virtual-device publisher for signed builds
 - a small AppKit UI that starts/stops the bridge, edits runtime settings and
   identity overrides, and shows bridge logs/device lifecycle
 
-Recognized Switch, PlayStation, Xbox and other exact output profiles,
-configuration persistence, authenticated networking and the full mapping UI are
-future milestones. A recognized profile needs its real descriptor, identity,
-input report layout and output protocol; changing only the displayed name or
-VID/PID is not enough.
+Complete Switch host-output handling, PlayStation, Xbox and other exact output
+profiles, configuration persistence, authenticated networking and the full
+mapping UI are future milestones. A recognized profile needs its real
+descriptor, identity, input report layout and output protocol; changing only the
+displayed name or VID/PID is not enough.
 
 ## Build
 
@@ -83,6 +85,7 @@ Useful options:
 --bind 0.0.0.0      Accept HID-over-UDP from trusted LAN devices
 --listen-port PORT  Listen on a custom UDP port
 --udp-source HOST   Send a UDP transport HELLO to a source, HOST[:PORT]
+--output-profile P  Select semantic output: generic, standard-gamepad, switch-pro
 ```
 
 Virtual-device identity overrides are available from both Terminal and the UI:
@@ -114,6 +117,7 @@ The current UI provides:
 - bridge executable path
 - bind address, listen port and optional UDP source
 - physical-input, dry-run and network testing toggles
+- output profile selection, including Switch 1 Pro Controller
 - VID/PID/version/product/manufacturer/serial/transport identity overrides
 - a device table and bridge log pane
 
@@ -168,6 +172,7 @@ on a trusted isolated LAN.
 - `src/protocol.cpp`: HID-over-UDP envelope parser/builder
 - `src/mapping.cpp`: button routes and per-axis calibration
 - `src/generic_hid_profile.cpp`: generated build-your-own HID descriptor/reports
+- `src/switch_pro_profile.cpp`: initial Switch 1 Pro descriptor and report encoder
 - `include/vhid/wire.h`: C-compatible sender helpers and wire constants
 
 See `docs/handoff.md`, `docs/protocol.md` and `docs/architecture.md` for the

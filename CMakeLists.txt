@@ -11,7 +11,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_library(vhid-core
     src/protocol.cpp
     src/mapping.cpp
-    src/generic_hid_profile.cpp)
+    src/generic_hid_profile.cpp
+    src/switch_pro_profile.cpp)
 target_include_directories(vhid-core PUBLIC include)
 target_compile_options(vhid-core PRIVATE -Wall -Wextra -Wpedantic)
 
@@ -46,10 +47,11 @@ target_link_libraries(vhid-bridge-ui PRIVATE
     "-framework AppKit"
     "-framework Foundation")
 add_dependencies(vhid-bridge-ui vhid-bridge)
-add_custom_command(TARGET vhid-bridge-ui POST_BUILD
+add_custom_target(vhid-bundle-helper ALL
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         $<TARGET_FILE:vhid-bridge>
         $<TARGET_BUNDLE_DIR:vhid-bridge-ui>/Contents/MacOS/vhid-bridge
+    DEPENDS vhid-bridge vhid-bridge-ui
     COMMENT "Embedding vhid-bridge helper in vhid-bridge-ui.app")
 
 find_program(CODESIGN_EXECUTABLE codesign)
@@ -62,7 +64,7 @@ if(CODESIGN_EXECUTABLE)
             $<TARGET_BUNDLE_DIR:vhid-bridge-ui>/Contents/MacOS/vhid-bridge
         COMMAND ${CODESIGN_EXECUTABLE} --force --sign ${VHID_CODE_SIGN_IDENTITY}
             $<TARGET_BUNDLE_DIR:vhid-bridge-ui>
-        DEPENDS vhid-bridge-ui
+        DEPENDS vhid-bundle-helper
         COMMENT "Signing vhid-bridge-ui.app and its entitled helper for local testing")
 endif()
 

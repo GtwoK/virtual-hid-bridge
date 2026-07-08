@@ -57,6 +57,7 @@ struct RemoteUdpSource {
 };
 
 struct IdentityOverrides {
+  bool profile_set = false;
   bool vendor_id_set = false;
   bool product_id_set = false;
   bool version_number_set = false;
@@ -64,6 +65,7 @@ struct IdentityOverrides {
   bool manufacturer_set = false;
   bool serial_set = false;
   bool transport_set = false;
+  vhid::DeviceProfile profile = vhid::DeviceProfile::generic;
   uint16_t vendor_id = 0;
   uint16_t product_id = 0;
   uint16_t version_number = 0;
@@ -80,6 +82,8 @@ struct IdentityOverrides {
   }
 
   void apply(vhid::DeviceDescription& description) const {
+    if (profile_set)
+      description.requested_profile = static_cast<uint8_t>(profile);
     if (vendor_id_set) description.vendor_id = vendor_id;
     if (product_id_set) description.product_id = product_id;
     if (version_number_set) description.version_number = version_number;
@@ -131,13 +135,15 @@ class Runtime {
     }
     auto profile =
         std::shared_ptr<vhid::HidProfile>(std::move(profile_unique));
+    vhid::HidDeviceProperties properties = profile->properties();
+    overrides_.apply(properties);
     Controller controller;
     controller.profile = profile;
     if (!dry_run_) {
       std::string error;
       const Route output_route = route;
       controller.device = vhid::VirtualDevice::create_raw(
-          profile->properties(), raw_output_handler(id, output_route), error);
+          properties, raw_output_handler(id, output_route), error);
       if (!controller.device) {
         std::cerr << "device " << id << ": " << error << '\n';
         return false;
@@ -145,7 +151,7 @@ class Runtime {
     }
     controllers_[id] = std::move(controller);
     std::cout << "device " << id << " added: "
-              << profile->properties().product << " ("
+              << properties.product << " ("
               << unsigned(effective_description.button_count) << " buttons, "
               << unsigned(effective_description.hat_count) << " hats, "
               << unsigned(effective_description.axis_count) << " axes)\n";
@@ -375,6 +381,21 @@ bool parse_transport(const std::string& text, std::string& out) {
   return true;
 }
 
+bool parse_profile(const std::string& text, vhid::DeviceProfile& out) {
+  if (text == "generic") {
+    out = vhid::DeviceProfile::generic;
+  } else if (text == "standard-gamepad" || text == "standard_gamepad" ||
+             text == "gamepad") {
+    out = vhid::DeviceProfile::standard_gamepad;
+  } else if (text == "switch-pro" || text == "switch1-pro" ||
+             text == "switch-1-pro" || text == "switch-pro-controller") {
+    out = vhid::DeviceProfile::switch_pro;
+  } else {
+    return false;
+  }
+  return true;
+}
+
 void consume_udp(int socket_fd, Runtime& runtime) {
   std::array<uint8_t, vhid::kMaxDatagramSize> buffer{};
   sockaddr_storage source{};
@@ -428,7 +449,8 @@ void usage(const char* name) {
                "       [--override-vendor-id N] [--override-product-id N]\n"
                "       [--override-version N] [--override-product NAME]\n"
                "       [--override-manufacturer NAME] [--override-serial TEXT]\n"
-               "       [--override-transport virtual|usb|bluetooth|ble|network]\n";
+               "       [--override-transport virtual|usb|bluetooth|ble|network]\n"
+               "       [--output-profile generic|standard-gamepad|switch-pro]\n";
 }
 
 }  // namespace
@@ -500,6 +522,12 @@ int main(int argc, char** argv) {
         return 2;
       }
       identity_overrides.transport_set = true;
+    } else if (argument == "--output-profile" && i + 1 < argc) {
+      if (!parse_profile(argv[++i], identity_overrides.profile)) {
+        usage(argv[0]);
+        return 2;
+      }
+      identity_overrides.profile_set = true;
     } else {
       usage(argv[0]);
       return 2;

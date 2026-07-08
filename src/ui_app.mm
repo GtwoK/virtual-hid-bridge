@@ -24,6 +24,7 @@
 @property(nonatomic, strong) NSTextField* manufacturerField;
 @property(nonatomic, strong) NSTextField* serialField;
 @property(nonatomic, strong) NSPopUpButton* transportPopup;
+@property(nonatomic, strong) NSPopUpButton* profilePopup;
 @property(nonatomic, strong) NSTextField* statusLabel;
 @property(nonatomic, strong) NSButton* startStopButton;
 @property(nonatomic, strong) NSButton* noPhysicalCheck;
@@ -167,6 +168,17 @@
             frame:NSMakeRect(20, y, 460, 22)];
   identityTitle.font = [NSFont boldSystemFontOfSize:13];
   [content addSubview:identityTitle];
+
+  [content addSubview:[self label:@"Output profile"
+                            frame:NSMakeRect(610, y, 95, 22)]];
+  self.profilePopup =
+      [[NSPopUpButton alloc] initWithFrame:NSMakeRect(710, y - 2, 220, 26)
+                                 pullsDown:NO];
+  [self.profilePopup addItemsWithTitles:@[
+    @"Source/default", @"Generic HID", @"Standard Gamepad",
+    @"Switch 1 Pro Controller"
+  ]];
+  [content addSubview:self.profilePopup];
 
   y -= 30;
   [content addSubview:[self label:@"VID"
@@ -330,6 +342,16 @@
   }
   if (self.dryRunCheck.state == NSControlStateValueOn) {
     [arguments addObject:@"--dry-run"];
+  }
+  NSString* profile = self.profilePopup.titleOfSelectedItem;
+  if ([profile isEqualToString:@"Generic HID"]) {
+    [arguments addObjectsFromArray:@[ @"--output-profile", @"generic" ]];
+  } else if ([profile isEqualToString:@"Standard Gamepad"]) {
+    [arguments addObjectsFromArray:@[
+      @"--output-profile", @"standard-gamepad"
+    ]];
+  } else if ([profile isEqualToString:@"Switch 1 Pro Controller"]) {
+    [arguments addObjectsFromArray:@[ @"--output-profile", @"switch-pro" ]];
   }
   [self addArgument:@"--override-vendor-id"
           fromField:self.vendorIdField

@@ -24,13 +24,20 @@ clients and eventually GameController-aware software can see.
   - VID/PID/version
   - product/manufacturer/serial
   - transport hint
+- Runtime output profile selection from both CLI and UI.
+- Initial Switch 1 Pro Controller output profile:
+  - Nintendo VID/PID/product/manufacturer defaults
+  - Switch Pro HID report descriptor
+  - standard `0x30` input report encoding from semantic controls
 
 ## Known limitations
 
 - The UI is a launcher/monitor, not yet an embedded bridge engine.
 - No saved configuration or profile store.
 - No real mapping editor yet.
-- No exact recognized controller output profiles yet.
+- Switch 1 Pro host-output handling is incomplete; USB init reports,
+  subcommand replies, SPI calibration reads and real HD rumble decoding are
+  still follow-up work.
 - Raw-HID transparent publication is implemented only when the source opts in.
 - UDP transport is unauthenticated.
 - Descriptor fragmentation and reliable lifecycle acknowledgements are not
@@ -48,7 +55,11 @@ clients and eventually GameController-aware software can see.
    - calibration
    - identity overrides
 3. Implement the first real source-decoder to semantic-state path.
-4. Implement the first recognized output profile.
+4. Complete the Switch 1 Pro output protocol:
+   - `0x80` USB init replies
+   - `0x21` subcommand replies
+   - SPI calibration/color data
+   - rumble and player LED handling
 5. Build the mapping UI:
    - source value monitor
    - output control list

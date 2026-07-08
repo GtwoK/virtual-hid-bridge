@@ -81,8 +81,9 @@ The normal route is:
 2. map/calibrate semantic controls;
 3. encode the selected virtual output profile.
 
-The bridge does not yet implement the full source-decoder/output-profile path.
-That is the next large backend milestone.
+Semantic sources can already select an output profile, including the initial
+Switch 1 Pro Controller encoder. Raw HID sources still need explicit source
+decoders before they can be mapped into arbitrary output profiles.
 
 ## Security status
 

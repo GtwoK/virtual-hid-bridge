@@ -5,6 +5,10 @@
 #include <cstring>
 
 namespace vhid {
+
+std::unique_ptr<HidProfile> make_switch_pro_profile(
+    const DeviceDescription& description);
+
 namespace {
 
 void append_i16(std::vector<uint8_t>& out, int16_t value) {
@@ -187,6 +191,9 @@ std::unique_ptr<HidProfile> make_profile(
   if (requested == DeviceProfile::generic ||
       requested == DeviceProfile::standard_gamepad) {
     return std::make_unique<GenericHidProfile>(description);
+  }
+  if (requested == DeviceProfile::switch_pro) {
+    return make_switch_pro_profile(description);
   }
   return nullptr;
 }

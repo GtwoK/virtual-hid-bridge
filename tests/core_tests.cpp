@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstring>
@@ -34,6 +35,15 @@ vhid::DeviceDescription test_description() {
     description.axes[i].logical_max = INT16_MAX;
     description.axes[i].flags = i >= 4 ? vhid::kAxisUnipolar : 0;
   }
+  return description;
+}
+
+vhid::DeviceDescription switch_description() {
+  auto description = test_description();
+  description.requested_profile =
+      static_cast<uint8_t>(vhid::DeviceProfile::switch_pro);
+  description.hat_count = 1;
+  std::strcpy(description.serial, "switch-pro-test");
   return description;
 }
 
@@ -188,6 +198,70 @@ void profile_test() {
   assert(output.duration_ms == 0x1234);
 }
 
+void switch_profile_test() {
+  auto profile = vhid::make_profile(switch_description());
+  assert(profile);
+  const auto& properties = profile->properties();
+  assert(properties.vendor_id == 0x057e);
+  assert(properties.product_id == 0x2009);
+  assert(properties.version_number == 0x0210);
+  assert(properties.product == "Pro Controller");
+  assert(properties.manufacturer == "Nintendo Co., Ltd.");
+  assert(properties.serial == "switch-pro-test");
+  assert(properties.transport == "USB");
+  assert(properties.report_descriptor.size() == 203);
+
+  vhid::InputState neutral{};
+  std::fill(std::begin(neutral.hats), std::end(neutral.hats), uint8_t{8});
+  const auto neutral_report = profile->encode(neutral);
+  assert(neutral_report.size() == 64);
+  assert(neutral_report[0] == 0x30);
+  assert(neutral_report[1] == 0);
+  assert(neutral_report[2] == 0x91);
+  assert(neutral_report[3] == 0);
+  assert(neutral_report[4] == 0);
+  assert(neutral_report[5] == 0);
+  assert(neutral_report[6] == 0x00);
+  assert(neutral_report[7] == 0x08);
+  assert(neutral_report[8] == 0x80);
+  assert(neutral_report[9] == 0x00);
+  assert(neutral_report[10] == 0x08);
+  assert(neutral_report[11] == 0x80);
+  assert(neutral_report[12] == 0x09);
+
+  vhid::InputState buttons{};
+  std::fill(std::begin(buttons.hats), std::end(buttons.hats), uint8_t{8});
+  buttons.buttons = (uint64_t{1} << 0) | (uint64_t{1} << 1) |
+                    (uint64_t{1} << 2) | (uint64_t{1} << 3) |
+                    (uint64_t{1} << 4) | (uint64_t{1} << 5) |
+                    (uint64_t{1} << 6) | (uint64_t{1} << 7) |
+                    (uint64_t{1} << 8) | (uint64_t{1} << 9) |
+                    (uint64_t{1} << 10) | (uint64_t{1} << 11) |
+                    (uint64_t{1} << 12) | (uint64_t{1} << 13) |
+                    (uint64_t{1} << 14) | (uint64_t{1} << 15) |
+                    (uint64_t{1} << 16) | (uint64_t{1} << 17);
+  const auto button_report = profile->encode(buttons);
+  assert(button_report[1] == 1);
+  assert(button_report[3] == 0xCF);
+  assert(button_report[4] == 0x3F);
+  assert(button_report[5] == 0xCF);
+
+  vhid::InputState hat{};
+  std::fill(std::begin(hat.hats), std::end(hat.hats), uint8_t{8});
+  hat.hats[0] = 1;
+  const auto hat_report = profile->encode(hat);
+  assert((hat_report[5] & 0x0F) == 0x06);
+
+  vhid::InputState sticks{};
+  std::fill(std::begin(sticks.hats), std::end(sticks.hats), uint8_t{8});
+  sticks.axes[0] = INT16_MAX;
+  sticks.axes[1] = INT16_MIN;
+  const auto stick_report = profile->encode(sticks);
+  assert(stick_report[6] == 0xFF);
+  assert(stick_report[7] == 0x0D);
+  assert(stick_report[8] == 0x20);
+}
+
 }  // namespace
 
 int main() {
@@ -195,6 +269,7 @@ int main() {
   wire_helper_test();
   mapping_test();
   profile_test();
+  switch_profile_test();
   std::cout << "VHID core protocol, mapping, calibration, descriptor, and "
                "report tests passed\n";
   return 0;

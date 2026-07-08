@@ -90,6 +90,13 @@
 }
 
 - (NSString*)defaultBridgePath {
+  NSString* executableDir =
+      NSBundle.mainBundle.executablePath.stringByDeletingLastPathComponent;
+  NSString* bundled =
+      [executableDir stringByAppendingPathComponent:@"vhid-bridge"];
+  if ([NSFileManager.defaultManager isExecutableFileAtPath:bundled]) {
+    return bundled;
+  }
   NSString* bundlePath = NSBundle.mainBundle.bundlePath;
   NSString* buildDir = bundlePath.stringByDeletingLastPathComponent;
   NSString* sibling = [buildDir stringByAppendingPathComponent:@"vhid-bridge"];
@@ -216,7 +223,7 @@
                            frame:NSMakeRect(20, 530, 940, 22)];
   [content addSubview:self.statusLabel];
 
-  NSTextField* hint = [self label:@"Virtual HID publishing requires signing the bridge executable with the entitlement, not just this UI app."
+  NSTextField* hint = [self label:@"Virtual HID publishing requires signing the bundled helper with the entitlement; the local signing target handles the helper and app."
                             frame:NSMakeRect(20, 506, 940, 22)];
   hint.textColor = NSColor.secondaryLabelColor;
   [content addSubview:hint];

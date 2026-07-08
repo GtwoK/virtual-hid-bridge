@@ -45,6 +45,26 @@ target_compile_options(vhid-bridge-ui PRIVATE -Wall -Wextra -Wpedantic -fobjc-ar
 target_link_libraries(vhid-bridge-ui PRIVATE
     "-framework AppKit"
     "-framework Foundation")
+add_dependencies(vhid-bridge-ui vhid-bridge)
+add_custom_command(TARGET vhid-bridge-ui POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        $<TARGET_FILE:vhid-bridge>
+        $<TARGET_BUNDLE_DIR:vhid-bridge-ui>/Contents/MacOS/vhid-bridge
+    COMMENT "Embedding vhid-bridge helper in vhid-bridge-ui.app")
+
+find_program(CODESIGN_EXECUTABLE codesign)
+if(CODESIGN_EXECUTABLE)
+    set(VHID_CODE_SIGN_IDENTITY "-" CACHE STRING
+        "Code signing identity for local Virtual HID Bridge builds")
+    add_custom_target(vhid-sign-local
+        COMMAND ${CODESIGN_EXECUTABLE} --force --sign ${VHID_CODE_SIGN_IDENTITY}
+            --entitlements ${CMAKE_SOURCE_DIR}/vhid.entitlements
+            $<TARGET_BUNDLE_DIR:vhid-bridge-ui>/Contents/MacOS/vhid-bridge
+        COMMAND ${CODESIGN_EXECUTABLE} --force --sign ${VHID_CODE_SIGN_IDENTITY}
+            $<TARGET_BUNDLE_DIR:vhid-bridge-ui>
+        DEPENDS vhid-bridge-ui
+        COMMENT "Signing vhid-bridge-ui.app and its entitled helper for local testing")
+endif()
 
 enable_testing()
 add_executable(vhid-core-tests tests/core_tests.cpp)

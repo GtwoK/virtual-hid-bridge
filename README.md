@@ -33,21 +33,23 @@ ctest --test-dir build --output-on-failure
 ```
 
 The command-line bridge is `build/vhid-bridge`. The UI app bundle is
-`build/vhid-bridge-ui.app`.
+`build/vhid-bridge-ui.app`. The app bundle embeds its own bridge helper at
+`build/vhid-bridge-ui.app/Contents/MacOS/vhid-bridge`, and the UI launches that
+bundled helper by default.
 
-For local entitlement testing, sign the bridge executable with the included
-entitlement after each build. Production distribution requires an Apple-authorized
-provisioning profile for `com.apple.developer.hid.virtual.device`.
+For local entitlement testing, build the signing target after each build. It
+ad-hoc signs the bundled helper with the included entitlement, then signs the
+app bundle. Production distribution requires an Apple-authorized provisioning
+profile for `com.apple.developer.hid.virtual.device` and a real signing
+identity/profile pair.
 
 ```sh
-codesign --force --sign - \
-  --entitlements vhid.entitlements \
-  build/vhid-bridge
+cmake --build build --target vhid-sign-local
 ```
 
-The current UI launches the bridge executable as a child process. That means
-the bridge executable needs the virtual-device entitlement/signing; signing only
-the UI app is not sufficient.
+If you run `build/vhid-bridge` directly from Terminal instead of through the
+app, that standalone executable still needs to be signed with the virtual HID
+entitlement separately.
 
 ## Run from Terminal
 

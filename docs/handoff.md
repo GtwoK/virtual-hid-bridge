@@ -14,7 +14,7 @@ clients and eventually GameController-aware software can see.
 
 - CMake project with C++20/Objective-C++.
 - `vhid-bridge`: command-line bridge.
-- `vhid-bridge-ui.app`: basic AppKit UI that launches the bridge executable.
+- `vhid-bridge-ui.app`: basic AppKit UI that launches its bundled bridge helper.
 - UDP HID-over-UDP receiver for raw HID descriptors/reports and semantic state.
 - C-compatible UDP sender helpers in `include/vhid/wire.h`.
 - Physical HID source using `IOHIDManager`.
@@ -68,10 +68,13 @@ ctest --test-dir build --output-on-failure
 For local entitlement testing:
 
 ```sh
-codesign --force --sign - --entitlements vhid.entitlements build/vhid-bridge
+cmake --build build --target vhid-sign-local
 build/vhid-bridge --no-physical --udp-source SENDER_IP
 open build/vhid-bridge-ui.app
 ```
 
-If the UI is used, make sure its bridge executable field points at the signed
-`build/vhid-bridge` binary.
+The UI app embeds `Contents/MacOS/vhid-bridge` and points at that helper by
+default. The signing target ad-hoc signs the bundled helper with
+`vhid.entitlements`, then signs the app bundle. Running the standalone
+`build/vhid-bridge` executable directly still requires signing that executable
+separately.

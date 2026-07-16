@@ -12,18 +12,18 @@ This is an early but testable foundation:
 - descriptor-backed HID source transport over UDP on port `48660`
 - one logical device per sender-provided device ID
 - generated generic HID gamepads with configurable buttons, hats, axes,
-  battery, vendor-defined motion and rumble output
+  battery and HID Sensors-page motion
 - an initial Switch 1 Pro Controller output profile with Nintendo identity,
   report descriptor, standard `0x30` input report encoding and host setup
-  replies used by SDL-style Nintendo drivers
+  replies used by SDL-style Nintendo drivers, plus source rumble forwarding
 - mapping/calibration core and unit tests
 - an entitlement-sensitive macOS virtual-device publisher for signed builds
 - a small AppKit UI that starts/stops the bridge, edits runtime settings and
   identity overrides, and shows bridge logs/device lifecycle
 
-PlayStation, Xbox and other exact output profiles, richer Switch output
-translation, configuration persistence, authenticated networking and the full
-mapping UI are future milestones. A recognized profile needs its real
+PlayStation, Xbox and other exact output profiles, player LEDs, configuration
+persistence, authenticated networking and the full mapping UI are future
+milestones. A recognized profile needs its real
 descriptor, identity, input report layout and output protocol; changing only
 the displayed name or VID/PID is not enough.
 
@@ -65,6 +65,15 @@ default:
 ```sh
 build/vhid-bridge
 python3 examples/send_demo.py
+```
+
+To test native Switch Pro output reports over UDP, run the bridge with the
+Switch output profile and have the demo sender explicitly request Switch Pro
+source output:
+
+```sh
+build/vhid-bridge --output-profile switch-pro
+python3 examples/send_demo.py --source-output-profile switch-pro
 ```
 
 UDP senders open a session, wait for `session_accept`, add controllers with HID
@@ -164,6 +173,13 @@ There is no universal packet layout shared by USB, Bluetooth and UDP.
 - Descriptor-backed UDP HID sources are decoded into the same internal
   `InputState` used by physical controllers, then mapped/calibrated and encoded
   through the selected virtual output profile.
+- Motion over UDP uses standard HID Sensors-page acceleration and angular
+  velocity fields. The bridge converts source acceleration from Gs to m/s² and
+  angular velocity from degrees/sec to rad/sec internally.
+- Source output reports use source-native protocols. The bridge can infer a
+  known source output profile from identity, or a UDP source can explicitly
+  announce one in `hid_device_add`; it does not infer rumble semantics from
+  arbitrary vendor-defined HID output reports.
 
 The C-compatible sender helpers in `include/vhid/wire.h` keep that envelope out
 of application code. A UDP sender can usually be structured as:

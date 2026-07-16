@@ -37,7 +37,7 @@ calls:
   descriptor
 - `hid_device_remove`: stable ID
 - `hid_input_report`: report type, report ID and raw input bytes
-- `hid_output_report`: raw host output bytes returned to the source
+- `hid_output_report`: source-side output report bytes returned to the source
 - `hid_get_report` / `hid_get_report_response`: feature/input report requests
 - `session_open`, `session_accept`, `session_close`: UDP session lifecycle
 - `session_ping`, `session_pong`: idle session keepalive
@@ -47,6 +47,13 @@ ID prefix. Descriptors travel at device creation; realtime packets contain only
 the controller ID, report metadata, sequencing/timestamp fields and report
 bytes. Complete input reports use latest-value-wins semantics, while lifecycle
 and output remain ordered.
+
+Input descriptors do not define a universal haptics format. Source output uses
+a source output codec selected from the source identity or the explicit
+`source_output_profile` field in `hid_device_add`. When that source output
+profile matches the selected virtual output profile, output reports can be
+forwarded as native bytes. Otherwise the bridge needs a real source-native
+encoder for that controller family.
 
 The optional semantic device/state messages support software that generates
 abstract controls but has no HID descriptor. They feed the internal mapping
@@ -126,9 +133,9 @@ diagnostic mode. The protocol flag is intentionally named
 republished.
 
 The generic profile is descriptor-driven and intended for SDL, raw HID and
-software accepting ordinary generic joysticks. Vendor-defined motion fields
-are available to raw-HID consumers but do not automatically become
-standardized SDL or Apple GameController motion.
+software accepting ordinary generic joysticks. HID Sensors-page acceleration
+and angular-velocity fields are available to raw-HID consumers but do not
+automatically become standardized SDL or Apple GameController motion.
 
 A recognized profile is an encoder, not a label. Each implementation must
 reproduce the descriptor, identity, input reports, feature reports and output

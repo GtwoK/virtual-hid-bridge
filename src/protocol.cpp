@@ -113,7 +113,11 @@ bool parse_hid_device_add(std::span<const uint8_t> payload,
   const auto* header =
       reinterpret_cast<const HidDeviceAddHeader*>(payload.data());
   if (header->descriptor_size == 0 ||
-      header->transport > static_cast<uint8_t>(HidTransport::network)) {
+      header->transport > static_cast<uint8_t>(HidTransport::network) ||
+      (header->source_output_profile != kHidSourceOutputProfileInfer &&
+       header->source_output_profile != kHidSourceOutputProfileNone &&
+       header->source_output_profile >
+           static_cast<uint8_t>(DeviceProfile::xbox))) {
     return false;
   }
   const size_t expected =

@@ -16,6 +16,12 @@ void append_i16(std::vector<uint8_t>& out, int16_t value) {
   out.push_back(static_cast<uint8_t>(static_cast<uint16_t>(value) >> 8));
 }
 
+void append_usage16(std::vector<uint8_t>& out, uint16_t usage) {
+  out.push_back(0x0A);
+  out.push_back(static_cast<uint8_t>(usage));
+  out.push_back(static_cast<uint8_t>(usage >> 8));
+}
+
 void append_logical(std::vector<uint8_t>& out, bool minimum, int32_t value) {
   if (value >= INT16_MIN && value <= INT16_MAX) {
     out.push_back(minimum ? 0x16 : 0x26);
@@ -76,7 +82,7 @@ class GenericHidProfile final : public HidProfile {
       report.push_back(state.battery_percent);
     if (description_.motion_flags & kMotionAcceleration) {
       for (float value : state.acceleration) {
-        const long scaled = std::lround(value / 9.80665f * 4096.0f);
+        const long scaled = std::lround(value / 9.80665f * 100.0f);
         append_i16(report, static_cast<int16_t>(
                                std::clamp(scaled, -32768l, 32767l)));
       }
@@ -84,7 +90,7 @@ class GenericHidProfile final : public HidProfile {
     if (description_.motion_flags & kMotionAngularVelocity) {
       constexpr float kRadiansToDegrees = 57.2957795131f;
       for (float value : state.angular_velocity) {
-        const long scaled = std::lround(value * kRadiansToDegrees * 16.0f);
+        const long scaled = std::lround(value * kRadiansToDegrees * 100.0f);
         append_i16(report, static_cast<int16_t>(
                                std::clamp(scaled, -32768l, 32767l)));
       }
@@ -94,13 +100,9 @@ class GenericHidProfile final : public HidProfile {
 
   bool decode_output(std::span<const uint8_t> report,
                      OutputState& output) const override {
-    if (report.size() < 6) return false;
-    output = {};
-    output.high_frequency = static_cast<uint16_t>(report[0]) * 257u;
-    output.low_frequency = static_cast<uint16_t>(report[2]) * 257u;
-    output.duration_ms =
-        static_cast<uint16_t>(report[4] | (report[5] << 8));
-    return true;
+    (void)report;
+    (void)output;
+    return false;
   }
 
  private:
@@ -163,20 +165,24 @@ class GenericHidProfile final : public HidProfile {
         ((description_.motion_flags & kMotionAcceleration) ? 3 : 0) +
         ((description_.motion_flags & kMotionAngularVelocity) ? 3 : 0);
     if (motion_fields) {
+      const uint8_t motion_page[] = {0x06, 0x20, 0x00};
+      out.insert(out.end(), std::begin(motion_page),
+                 std::end(motion_page));
+      if (description_.motion_flags & kMotionAcceleration) {
+        append_usage16(out, 0x0453);
+        append_usage16(out, 0x0454);
+        append_usage16(out, 0x0455);
+      }
+      if (description_.motion_flags & kMotionAngularVelocity) {
+        append_usage16(out, 0x0457);
+        append_usage16(out, 0x0458);
+        append_usage16(out, 0x0459);
+      }
       const uint8_t motion[] = {
-          0x06, 0x00, 0xFF, 0x19, 0x01, 0x29, motion_fields,
-          0x16, 0x00, 0x80, 0x26, 0xFF, 0x7F,
-          0x75, 0x10, 0x95, motion_fields, 0x81, 0x02,
+          0x16, 0x00, 0x80, 0x26, 0xFF, 0x7F, 0x55, 0x0E,
+          0x75, 0x10, 0x95, motion_fields, 0x81, 0x02, 0x55, 0x00,
       };
       out.insert(out.end(), std::begin(motion), std::end(motion));
-    }
-
-    if (description_.device_flags & kDeviceHasRumble) {
-      const uint8_t rumble[] = {
-          0x06, 0x00, 0xFF, 0x09, 0x10, 0x15, 0x00, 0x26,
-          0xFF, 0x00, 0x75, 0x08, 0x95, 0x06, 0x91, 0x02,
-      };
-      out.insert(out.end(), std::begin(rumble), std::end(rumble));
     }
     out.push_back(0xC0);
   }

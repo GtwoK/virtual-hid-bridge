@@ -11,6 +11,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_library(vhid-core
     src/protocol.cpp
     src/hid_source_decoder.cpp
+    src/source_output_codec.cpp
     src/mapping.cpp
     src/generic_hid_profile.cpp
     src/switch_pro_profile.cpp)

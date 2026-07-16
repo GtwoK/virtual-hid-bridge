@@ -69,6 +69,19 @@ bool button_pressed(const InputState& state, uint8_t index) {
   return index < kMaxButtons && (state.buttons & (uint64_t{1} << index));
 }
 
+uint16_t scaled_u16(uint32_t value, uint32_t minimum, uint32_t maximum) {
+  if (maximum <= minimum || value <= minimum) return 0;
+  if (value >= maximum) return 0xFFFF;
+  return static_cast<uint16_t>(((value - minimum) * 0xFFFFu) /
+                               (maximum - minimum));
+}
+
+uint16_t decode_low_rumble_amplitude(uint32_t value) {
+  if (value >= 0x8000u)
+    return scaled_u16(value, 0x803F, 0x8072);
+  return scaled_u16(value, 0x0040, 0x007F);
+}
+
 uint8_t switch_battery_connection(uint8_t battery_percent) {
   if (battery_percent == 0) return 0x91;
   if (battery_percent >= 80) return 0x81;
@@ -104,6 +117,26 @@ void pack_stick(uint8_t* out, int16_t x, int16_t y) {
 void append_i16(uint8_t* out, int16_t value) {
   out[0] = static_cast<uint8_t>(value);
   out[1] = static_cast<uint8_t>(static_cast<uint16_t>(value) >> 8);
+}
+
+OutputState decode_rumble_data(std::span<const uint8_t> rumble) {
+  OutputState output{};
+  if (rumble.size() < 8) return output;
+  for (size_t motor = 0; motor < 2; ++motor) {
+    const auto sample = rumble.subspan(motor * 4, 4);
+    const uint32_t high_amplitude = sample[1] & 0xFEu;
+    const uint32_t low_amplitude =
+        ((sample[2] & 0x80u) << 8) | sample[3];
+    output.high_frequency =
+        std::max(output.high_frequency,
+                 scaled_u16(high_amplitude, 0x00, 0xC8));
+    output.low_frequency =
+        std::max(output.low_frequency,
+                 decode_low_rumble_amplitude(low_amplitude));
+  }
+  if (output.low_frequency || output.high_frequency)
+    output.duration_ms = 100;
+  return output;
 }
 
 void encode_calibration_pair(uint8_t* out, uint16_t first,
@@ -223,16 +256,7 @@ class SwitchProProfile final : public HidProfile {
         !report.empty() && (report[0] == 0x01 || report[0] == 0x10);
     const size_t rumble_offset = includes_report_id ? 2 : 1;
     if (report.size() < rumble_offset + 8) return false;
-    output = {};
-    const auto rumble = report.subspan(rumble_offset, 8);
-    const bool active = std::any_of(
-        rumble.begin(), rumble.end(), [](uint8_t value) {
-          return value != 0;
-        });
-    if (active) {
-      output.low_frequency = 0xFFFF;
-      output.high_frequency = 0xFFFF;
-    }
+    output = decode_rumble_data(report.subspan(rumble_offset, 8));
     return true;
   }
 

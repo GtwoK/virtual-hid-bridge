@@ -8,6 +8,7 @@
 #include "vhid/hid_source_decoder.h"
 #include "vhid/mapping.h"
 #include "vhid/protocol.h"
+#include "vhid/source_output_codec.h"
 #include "vhid/wire.h"
 
 namespace {
@@ -17,8 +18,7 @@ vhid::DeviceDescription test_description() {
   description.requested_profile =
       static_cast<uint8_t>(vhid::DeviceProfile::generic);
   description.device_flags = vhid::kDeviceHasBattery |
-                             vhid::kDeviceHasMotion |
-                             vhid::kDeviceHasRumble;
+                             vhid::kDeviceHasMotion;
   description.button_count = 18;
   description.axis_count = 6;
   description.motion_flags =
@@ -46,6 +46,10 @@ vhid::DeviceDescription switch_description() {
   description.hat_count = 1;
   std::strcpy(description.serial, "switch-pro-test");
   return description;
+}
+
+bool near_float(float actual, double expected, double tolerance = 0.001) {
+  return std::abs(static_cast<double>(actual) - expected) <= tolerance;
 }
 
 void protocol_test() {
@@ -129,6 +133,7 @@ void wire_helper_test() {
   device.flags = VHID_DEVICE_ALLOW_TRANSPARENT_OUTPUT;
   device.report_descriptor = descriptor;
   device.report_descriptor_size = sizeof(descriptor);
+  device.source_output_profile = VHID_PROFILE_SWITCH_PRO;
   device.product = "Wire Helper Controller";
   device.manufacturer = "VHID";
   device.serial = "wire-1";
@@ -144,6 +149,8 @@ void wire_helper_test() {
   assert(vhid::parse_hid_device_add(parsed.payload, parsed_device));
   assert(parsed_device.product == "Wire Helper Controller");
   assert(parsed_device.descriptor.size() == sizeof(descriptor));
+  assert(parsed_device.header->source_output_profile ==
+         VHID_PROFILE_SWITCH_PRO);
 
   const uint8_t report_bytes[] = {1};
   size = vhid_make_hid_input_report(&sender, 7, report_bytes,
@@ -287,6 +294,101 @@ void hid_source_array_button_test() {
   assert(decoded.buttons == (uint64_t{1} << 1));
 }
 
+void hid_source_motion_test() {
+  const uint8_t descriptor[] = {
+      0x05, 0x01, 0x09, 0x05, 0xA1, 0x01,
+      0x06, 0x20, 0x00,
+      0x0A, 0x53, 0x04, 0x0A, 0x54, 0x04, 0x0A, 0x55, 0x04,
+      0x0A, 0x57, 0x04, 0x0A, 0x58, 0x04, 0x0A, 0x59, 0x04,
+      0x16, 0x00, 0x80, 0x26, 0xFF, 0x7F,
+      0x55, 0x0E,
+      0x75, 0x10, 0x95, 0x06, 0x81, 0x02,
+      0x55, 0x00,
+      0xC0,
+  };
+  vhid::HidDeviceAddHeader device{
+      .vendor_id = 0x1209,
+      .product_id = 0x5342,
+      .version_number = 1,
+      .transport = static_cast<uint8_t>(vhid::HidTransport::network),
+  };
+  const auto add = vhid::make_hid_device_add(
+      79, 1, 1000, device, descriptor, "Motion Controller", "VHID",
+      "motion-1");
+  vhid::ParsedMessage parsed;
+  assert(vhid::parse_message(add, parsed));
+  vhid::ParsedHidDeviceAdd parsed_device;
+  assert(vhid::parse_hid_device_add(parsed.payload, parsed_device));
+  std::string error;
+  auto decoder = vhid::HidSourceDecoder::create(parsed_device, error);
+  assert(decoder);
+  assert(decoder->description().device_flags & vhid::kDeviceHasMotion);
+  assert(decoder->description().motion_flags & vhid::kMotionAcceleration);
+  assert(decoder->description().motion_flags & vhid::kMotionAngularVelocity);
+
+  std::vector<uint8_t> report_bytes;
+  const auto append_i16 = [&report_bytes](int16_t value) {
+    report_bytes.push_back(static_cast<uint8_t>(value));
+    report_bytes.push_back(static_cast<uint8_t>(
+        static_cast<uint16_t>(value) >> 8));
+  };
+  append_i16(100);
+  append_i16(-50);
+  append_i16(0);
+  append_i16(9000);
+  append_i16(-4500);
+  append_i16(0);
+  const auto input = vhid::make_hid_report(
+      vhid::MessageType::hid_input_report, 79, 2, 1100,
+      vhid::HidReportType::input, 0, report_bytes);
+  assert(vhid::parse_message(input, parsed));
+  vhid::ParsedHidReport parsed_report;
+  assert(vhid::parse_hid_report(parsed.payload, parsed_report));
+  vhid::InputState decoded{};
+  assert(decoder->decode_input(parsed_report, decoded));
+  assert(near_float(decoded.acceleration[0], 9.80665));
+  assert(near_float(decoded.acceleration[1], -4.903325));
+  assert(near_float(decoded.acceleration[2], 0.0));
+  assert(near_float(decoded.angular_velocity[0], 1.5707963267948966));
+  assert(near_float(decoded.angular_velocity[1], -0.7853981633974483));
+  assert(near_float(decoded.angular_velocity[2], 0.0));
+}
+
+void source_output_codec_test() {
+  assert(vhid::infer_source_output_profile(0x057e, 0x2009) ==
+         vhid::DeviceProfile::switch_pro);
+  assert(!vhid::infer_source_output_profile(0x1209, 0x5342));
+
+  vhid::HidDeviceAddHeader inferred{
+      .vendor_id = 0x057e,
+      .product_id = 0x2009,
+      .source_output_profile = vhid::kHidSourceOutputProfileInfer,
+  };
+  assert(vhid::announced_source_output_profile(inferred) ==
+         vhid::DeviceProfile::switch_pro);
+
+  vhid::HidDeviceAddHeader explicit_profile{
+      .vendor_id = 0x1209,
+      .product_id = 0x5342,
+      .source_output_profile =
+          static_cast<uint8_t>(vhid::DeviceProfile::switch_pro),
+  };
+  assert(vhid::announced_source_output_profile(explicit_profile) ==
+         vhid::DeviceProfile::switch_pro);
+
+  vhid::HidDeviceAddHeader disabled{
+      .vendor_id = 0x057e,
+      .product_id = 0x2009,
+      .source_output_profile = vhid::kHidSourceOutputProfileNone,
+  };
+  assert(!vhid::announced_source_output_profile(disabled));
+
+  auto codec = vhid::make_source_output_codec(vhid::DeviceProfile::switch_pro);
+  assert(codec);
+  assert(codec->accepts_native_reports_from(vhid::DeviceProfile::switch_pro));
+  assert(!codec->accepts_native_reports_from(vhid::DeviceProfile::generic));
+}
+
 void mapping_test() {
   vhid::InputState source{};
   source.buttons = (uint64_t{1} << 0) | (uint64_t{1} << 20);
@@ -329,10 +431,7 @@ void profile_test() {
 
   const uint8_t raw_output[] = {128, 0, 64, 0, 0x34, 0x12};
   vhid::OutputState output{};
-  assert(profile->decode_output(raw_output, output));
-  assert(output.high_frequency == 128u * 257u);
-  assert(output.low_frequency == 64u * 257u);
-  assert(output.duration_ms == 0x1234);
+  assert(!profile->decode_output(raw_output, output));
 }
 
 void switch_profile_test() {
@@ -413,6 +512,25 @@ void switch_profile_test() {
   dpad.buttons = uint64_t{1} << 15;
   assert((profile->encode(dpad)[5] & 0x0F) == 0x04);
 
+  vhid::OutputState neutral_rumble{};
+  const uint8_t neutral_output[] = {
+      0x00, 0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40, 0x40,
+  };
+  assert(profile->decode_output(neutral_output, neutral_rumble));
+  assert(neutral_rumble.high_frequency == 0);
+  assert(neutral_rumble.low_frequency == 0);
+  assert(neutral_rumble.duration_ms == 0);
+
+  vhid::OutputState active_rumble{};
+  const uint8_t active_output[] = {
+      0x10, 0x00, 0x00, 0xC8, 0x80, 0x72,
+      0x00, 0xC8, 0x80, 0x72,
+  };
+  assert(profile->decode_output(active_output, active_rumble));
+  assert(active_rumble.high_frequency > 60000);
+  assert(active_rumble.low_frequency > 60000);
+  assert(active_rumble.duration_ms == 100);
+
   vhid::InputState sticks{};
   std::fill(std::begin(sticks.hats), std::end(sticks.hats), uint8_t{8});
   sticks.axes[0] = INT16_MAX;
@@ -481,6 +599,8 @@ int main() {
   wire_helper_test();
   hid_source_decoder_test();
   hid_source_array_button_test();
+  hid_source_motion_test();
+  source_output_codec_test();
   mapping_test();
   profile_test();
   switch_profile_test();

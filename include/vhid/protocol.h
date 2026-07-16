@@ -22,6 +22,8 @@ constexpr size_t kMaxDatagramSize = 1400;
 constexpr size_t kMaxButtons = 64;
 constexpr size_t kMaxHats = 4;
 constexpr size_t kMaxAxes = 16;
+constexpr uint8_t kHidSourceOutputProfileInfer = 0;
+constexpr uint8_t kHidSourceOutputProfileNone = 0xff;
 
 enum class MessageType : uint8_t {
   session_open = 1,
@@ -123,7 +125,7 @@ struct HidDeviceAddHeader {
   uint8_t product_size;
   uint8_t manufacturer_size;
   uint8_t serial_size;
-  uint8_t reserved;
+  uint8_t source_output_profile;
 };
 
 // Report bytes never contain the report ID prefix. The ID is carried here so

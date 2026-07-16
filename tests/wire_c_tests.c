@@ -32,6 +32,7 @@ int main(void) {
     device.flags = VHID_DEVICE_ALLOW_TRANSPARENT_OUTPUT;
     device.report_descriptor = descriptor;
     device.report_descriptor_size = (uint16_t)sizeof(descriptor);
+    device.source_output_profile = VHID_PROFILE_SWITCH_PRO;
     device.product = "C Sender";
     device.manufacturer = "VHID";
     device.serial = "c-1";
@@ -44,6 +45,8 @@ int main(void) {
     assert(packet[5] == VHID_MSG_HID_DEVICE_ADD);
     assert(read_u32_le(packet + 12) == 77);
     assert(read_u32_le(packet + 16) == 0);
+    assert(packet[sizeof(vhid_message_header_t) + 13] ==
+           VHID_PROFILE_SWITCH_PRO);
 
     size = vhid_make_hid_input_report(
         &sender, 0, report, (uint16_t)sizeof(report), 20, packet,

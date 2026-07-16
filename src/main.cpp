@@ -28,6 +28,7 @@
 #include "vhid/mapping.h"
 #include "vhid/physical_hid_source.h"
 #include "vhid/protocol.h"
+#include "vhid/source_output_codec.h"
 
 namespace {
 
@@ -164,7 +165,9 @@ struct Controller {
   vhid::ControllerMapping mapping = vhid::ControllerMapping::identity();
   std::shared_ptr<vhid::HidProfile> profile;
   std::unique_ptr<vhid::HidSourceDecoder> source_decoder;
+  std::unique_ptr<vhid::SourceOutputCodec> source_output_codec;
   std::unique_ptr<vhid::VirtualDevice> device;
+  vhid::DeviceProfile output_profile = vhid::DeviceProfile::generic;
   uint32_t last_sequence = 0;
   bool have_sequence = false;
   bool raw_hid = false;
@@ -193,6 +196,16 @@ class Runtime {
     overrides_.apply(properties);
     Controller controller;
     controller.profile = profile;
+    controller.output_profile =
+        static_cast<vhid::DeviceProfile>(
+            effective_description.requested_profile);
+    if (const auto source_output_profile =
+            vhid::infer_source_output_profile(
+                effective_description.vendor_id,
+                effective_description.product_id)) {
+      controller.source_output_codec =
+          vhid::make_source_output_codec(*source_output_profile);
+    }
     if (!dry_run_) {
       std::string error;
       const Route output_route = route;
@@ -253,6 +266,20 @@ class Runtime {
     Controller controller;
     controller.profile = profile;
     controller.source_decoder = std::move(decoder);
+    controller.output_profile =
+        static_cast<vhid::DeviceProfile>(
+            effective_description.requested_profile);
+    if (const auto source_output_profile =
+            vhid::announced_source_output_profile(*source.header)) {
+      controller.source_output_codec =
+          vhid::make_source_output_codec(*source_output_profile);
+      if (!controller.source_output_codec) {
+        std::cerr << "device " << id << ": source output profile "
+                  << profile_name(static_cast<uint8_t>(
+                         *source_output_profile))
+                  << " is not implemented; source rumble disabled\n";
+      }
+    }
     if (!dry_run_) {
       std::string error;
       const Route output_route = route;
@@ -401,16 +428,57 @@ class Runtime {
   }
 
  private:
+  void send_source_report(const Route& route, vhid::HidReportType type,
+                          uint8_t report_id,
+                          std::span<const uint8_t> data) {
+    const auto message = vhid::make_hid_report(
+        vhid::MessageType::hid_output_report, route.source_device_id,
+        output_sequence_.fetch_add(1), now_us(), type, report_id, data);
+    if (!message.empty())
+      sendto(route.socket, message.data(), message.size(), 0,
+             reinterpret_cast<const sockaddr*>(&route.address),
+             route.address_length);
+  }
+
   vhid::VirtualDevice::RawReportHandler raw_output_handler(
       uint32_t id, Route route) {
     return [this, id, route](vhid::HidReportType type, uint8_t report_id,
                             std::span<const uint8_t> data) {
       std::vector<uint8_t> response;
+      vhid::SourceOutputReport source_report;
+      bool have_source_report = false;
+      bool allow_raw_report_forward = false;
       bool consumed = false;
       {
         std::lock_guard lock(mutex_);
         auto found = controllers_.find(id);
         if (found != controllers_.end() && found->second.profile) {
+          allow_raw_report_forward = found->second.raw_hid;
+          if (type != vhid::HidReportType::input && route.supports_output &&
+              found->second.source_output_codec) {
+            auto& codec = *found->second.source_output_codec;
+            if (codec.accepts_native_reports_from(
+                    found->second.output_profile)) {
+              source_report.type = type;
+              source_report.report_id = report_id;
+              source_report.data.assign(data.begin(), data.end());
+              have_source_report = true;
+            } else if (type == vhid::HidReportType::output) {
+              vhid::OutputState output{};
+              bool decoded_output =
+                  found->second.profile->decode_output(data, output);
+              std::vector<uint8_t> packet;
+              if (!decoded_output && report_id) {
+                packet.reserve(data.size() + 1);
+                packet.push_back(report_id);
+                packet.insert(packet.end(), data.begin(), data.end());
+                decoded_output =
+                    found->second.profile->decode_output(packet, output);
+              }
+              have_source_report =
+                  decoded_output && codec.encode(output, source_report);
+            }
+          }
           consumed = found->second.profile->handle_host_report(
               type, report_id, data, response);
           if (!response.empty() && found->second.device &&
@@ -420,19 +488,19 @@ class Runtime {
           }
         }
       }
+      if (have_source_report) {
+        send_source_report(route, source_report.type,
+                           source_report.report_id, source_report.data);
+        return;
+      }
       if (consumed) return;
       if (!route.supports_output) {
         std::cerr << "device " << id
                   << ": output has no return path for this source\n";
         return;
       }
-      const auto message = vhid::make_hid_report(
-          vhid::MessageType::hid_output_report, route.source_device_id,
-          output_sequence_.fetch_add(1), now_us(), type, report_id, data);
-      if (!message.empty())
-        sendto(route.socket, message.data(), message.size(), 0,
-               reinterpret_cast<const sockaddr*>(&route.address),
-               route.address_length);
+      if (!allow_raw_report_forward) return;
+      send_source_report(route, type, report_id, data);
     };
   }
 

@@ -77,6 +77,12 @@ The sender should keep `device_id` stable for the same physical controller when
 possible. The serial string is the best place to carry a stable per-controller
 identity for profile recall.
 
+The final byte of `HidDeviceAddHeader` is `source_output_profile`. A value of
+`0` asks the bridge to infer the source output protocol from identity. A value
+of `0xff` disables source output. Other values use the `DeviceProfile` numeric
+IDs, so a generic input descriptor can explicitly ask to receive Switch Pro
+output reports by setting this field to `2`.
+
 ## HID reports
 
 `hid_input_report`, `hid_output_report`, `hid_get_report` and
@@ -89,6 +95,17 @@ report-ID prefix. For report-ID-less devices, the report ID is `0`.
 
 Input reports are latest-value-wins. Lifecycle and output messages should remain
 ordered.
+
+Motion sources should use the HID Sensors page (`0x20`) for acceleration and
+angular velocity fields. The bridge accepts the standard acceleration X/Y/Z
+and angular velocity X/Y/Z usages, applies the HID unit exponent, treats the
+default units as Gs and degrees/sec, then stores m/s² and rad/sec internally.
+
+Source output reports are source-native. If the selected virtual output profile
+and source output profile match, the bridge forwards the profile-native output
+report bytes to the source. Cross-profile haptics require a source output codec
+for the announced source profile; the bridge does not assign rumble meaning to
+arbitrary vendor-defined HID output reports.
 
 ## Transparent mode
 

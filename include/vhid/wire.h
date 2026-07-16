@@ -60,8 +60,20 @@ typedef enum {
     VHID_TRANSPORT_NETWORK        = 4,
 } vhid_transport_t;
 
+typedef enum {
+    VHID_PROFILE_GENERIC          = 0,
+    VHID_PROFILE_STANDARD_GAMEPAD = 1,
+    VHID_PROFILE_SWITCH_PRO       = 2,
+    VHID_PROFILE_SWITCH_2_PRO     = 3,
+    VHID_PROFILE_DUALSHOCK_4      = 4,
+    VHID_PROFILE_DUALSENSE        = 5,
+    VHID_PROFILE_XBOX             = 6,
+} vhid_device_profile_t;
+
 enum {
     VHID_DEVICE_ALLOW_TRANSPARENT_OUTPUT = 1u << 0,
+    VHID_SOURCE_OUTPUT_PROFILE_INFER = 0,
+    VHID_SOURCE_OUTPUT_PROFILE_NONE = 0xff,
 };
 
 typedef struct __attribute__((packed)) {
@@ -94,7 +106,7 @@ typedef struct __attribute__((packed)) {
     uint8_t  product_size;
     uint8_t  manufacturer_size;
     uint8_t  serial_size;
-    uint8_t  reserved;
+    uint8_t  source_output_profile;
 } vhid_hid_device_add_header_t;
 
 typedef struct __attribute__((packed)) {
@@ -116,6 +128,7 @@ typedef struct {
     uint8_t flags;
     const uint8_t* report_descriptor;
     uint16_t report_descriptor_size;
+    uint8_t source_output_profile;
     const char* product;
     const char* manufacturer;
     const char* serial;
@@ -325,7 +338,7 @@ static inline size_t vhid_make_hid_device_add(
     out[offset + 10] = (uint8_t)product_size;
     out[offset + 11] = (uint8_t)manufacturer_size;
     out[offset + 12] = (uint8_t)serial_size;
-    out[offset + 13] = 0;
+    out[offset + 13] = device->source_output_profile;
     offset += sizeof(vhid_hid_device_add_header_t);
     vhid_wire_copy(out + offset, device->report_descriptor,
                    device->report_descriptor_size);

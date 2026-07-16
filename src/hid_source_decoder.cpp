@@ -15,9 +15,18 @@ namespace {
 
 constexpr uint32_t kPageGenericDesktop = 0x01;
 constexpr uint32_t kPageButton = 0x09;
+constexpr uint32_t kPageSensors = 0x20;
 constexpr uint32_t kUsageHatSwitch = 0x39;
+constexpr uint32_t kUsageAccelerationAxisX = 0x0453;
+constexpr uint32_t kUsageAccelerationAxisY = 0x0454;
+constexpr uint32_t kUsageAccelerationAxisZ = 0x0455;
+constexpr uint32_t kUsageAngularVelocityX = 0x0457;
+constexpr uint32_t kUsageAngularVelocityY = 0x0458;
+constexpr uint32_t kUsageAngularVelocityZ = 0x0459;
+constexpr double kMetersPerGravity = 9.80665;
+constexpr double kRadiansPerDegree = 0.017453292519943295;
 
-enum class FieldKind { button, button_array, hat, axis };
+enum class FieldKind { button, button_array, hat, axis, motion };
 
 struct Usage {
   uint32_t page = 0;
@@ -35,6 +44,7 @@ struct Field {
   Usage usage_max;
   FieldKind kind = FieldKind::axis;
   uint8_t index = 0;
+  int32_t unit_exponent = 0;
 };
 
 struct GlobalState {
@@ -44,6 +54,7 @@ struct GlobalState {
   uint32_t report_size = 0;
   uint8_t report_id = 0;
   uint32_t report_count = 0;
+  int32_t unit_exponent = 0;
 };
 
 struct LocalState {
@@ -75,6 +86,12 @@ int32_t read_signed(std::span<const uint8_t> bytes) {
   return static_cast<int32_t>(value | mask);
 }
 
+int32_t read_unit_exponent(std::span<const uint8_t> bytes) {
+  if (bytes.empty()) return 0;
+  const uint8_t nibble = bytes[0] & 0x0f;
+  return nibble < 8 ? nibble : static_cast<int32_t>(nibble) - 16;
+}
+
 Usage usage_from_item(uint32_t value, size_t size, uint32_t usage_page) {
   if (size == 4) return Usage{value >> 16, value & 0xffffu};
   return Usage{usage_page, value};
@@ -103,6 +120,40 @@ bool is_axis_usage(const Usage& usage) {
     case 0x36:
     case 0x37:
     case 0x38:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool is_acceleration_usage(const Usage& usage, uint8_t& index) {
+  if (usage.page != kPageSensors) return false;
+  switch (usage.usage) {
+    case kUsageAccelerationAxisX:
+      index = 0;
+      return true;
+    case kUsageAccelerationAxisY:
+      index = 1;
+      return true;
+    case kUsageAccelerationAxisZ:
+      index = 2;
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool is_angular_velocity_usage(const Usage& usage, uint8_t& index) {
+  if (usage.page != kPageSensors) return false;
+  switch (usage.usage) {
+    case kUsageAngularVelocityX:
+      index = 0;
+      return true;
+    case kUsageAngularVelocityY:
+      index = 1;
+      return true;
+    case kUsageAngularVelocityZ:
+      index = 2;
       return true;
     default:
       return false;
@@ -158,7 +209,8 @@ class GenericHidSourceDecoder final : public HidSourceDecoder {
  public:
   GenericHidSourceDecoder(DeviceDescription description,
                           std::vector<Field> fields)
-      : description_(description), fields_(std::move(fields)) {
+      : description_(description),
+        fields_(std::move(fields)) {
     std::fill(std::begin(state_.hats), std::end(state_.hats), uint8_t{8});
   }
 
@@ -218,6 +270,23 @@ class GenericHidSourceDecoder final : public HidSourceDecoder {
                   : static_cast<int64_t>(raw);
           state_.axes[field.index] =
               normalize_axis(value, field.logical_min, field.logical_max);
+          break;
+        }
+        case FieldKind::motion: {
+          const int64_t value =
+              field.logical_min < 0
+                  ? signed_value(raw, field.bit_size)
+                  : static_cast<int64_t>(raw);
+          const float scaled = static_cast<float>(
+              static_cast<double>(value) *
+              std::pow(10.0, static_cast<double>(field.unit_exponent)));
+          if (field.index < 3) {
+            state_.acceleration[field.index] =
+                scaled * static_cast<float>(kMetersPerGravity);
+          } else if (field.index < 6) {
+            state_.angular_velocity[field.index - 3] =
+                scaled * static_cast<float>(kRadiansPerDegree);
+          }
           break;
         }
       }
@@ -314,6 +383,9 @@ class DescriptorBuilder {
             break;
           case 2:
             global.logical_max = read_signed(data);
+            break;
+          case 5:
+            global.unit_exponent = read_unit_exponent(data);
             break;
           case 7:
             global.report_size = unsigned_value;
@@ -433,6 +505,26 @@ class DescriptorBuilder {
                               static_cast<uint8_t>(global.report_size),
                               global.logical_min, global.logical_max, usage,
                               {}, {}, FieldKind::axis, index});
+    } else {
+      uint8_t motion_index = 0;
+      if (is_acceleration_usage(usage, motion_index)) {
+        description_.device_flags |= kDeviceHasMotion;
+        description_.motion_flags |= kMotionAcceleration;
+        fields_.push_back(Field{global.report_id, bit_offset,
+                                static_cast<uint8_t>(global.report_size),
+                                global.logical_min, global.logical_max, usage,
+                                {}, {}, FieldKind::motion, motion_index,
+                                global.unit_exponent});
+      } else if (is_angular_velocity_usage(usage, motion_index)) {
+        description_.device_flags |= kDeviceHasMotion;
+        description_.motion_flags |= kMotionAngularVelocity;
+        fields_.push_back(Field{global.report_id, bit_offset,
+                                static_cast<uint8_t>(global.report_size),
+                                global.logical_min, global.logical_max, usage,
+                                {}, {}, FieldKind::motion,
+                                static_cast<uint8_t>(motion_index + 3),
+                                global.unit_exponent});
+      }
     }
   }
 

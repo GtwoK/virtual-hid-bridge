@@ -6,14 +6,15 @@
 #include <csignal>
 #include <cstdio>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <memory>
 #include <mutex>
-#include <cstdlib>
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -23,6 +24,7 @@
 #include <unistd.h>
 
 #include "vhid/hid_profile.h"
+#include "vhid/hid_source_decoder.h"
 #include "vhid/mapping.h"
 #include "vhid/physical_hid_source.h"
 #include "vhid/protocol.h"
@@ -30,6 +32,12 @@
 namespace {
 
 volatile std::sig_atomic_t stop_requested = 0;
+
+constexpr uint32_t kBridgePeerId = 1;
+constexpr uint64_t kSessionOpenRetryUs = 5'000'000;
+constexpr uint64_t kSessionKeepaliveUs = 5'000'000;
+constexpr uint64_t kSessionTimeoutUs = 15'000'000;
+constexpr uint32_t kFirstNetworkDeviceId = 0x40000000u;
 
 uint64_t now_us() {
   return std::chrono::duration_cast<std::chrono::microseconds>(
@@ -76,16 +84,29 @@ struct Route {
   int socket = -1;
   sockaddr_storage address{};
   socklen_t address_length = 0;
+  uint32_t source_device_id = 0;
   bool supports_output = false;
 };
 
-struct RemoteUdpSource {
+struct SessionDevice {
+  uint32_t source_id = 0;
+  uint32_t bridge_id = 0;
+};
+
+struct UdpSession {
   sockaddr_storage address{};
   socklen_t address_length = 0;
   std::string label;
-  uint64_t last_hello_us = 0;
+  uint32_t session_id = 0;
+  uint64_t last_open_us = 0;
+  uint64_t last_ping_us = 0;
+  uint64_t last_rx_us = 0;
+  uint64_t last_tx_us = 0;
   uint32_t sequence = 0;
   bool enabled = false;
+  bool open_sent = false;
+  bool active = false;
+  std::vector<SessionDevice> devices;
 };
 
 struct IdentityOverrides {
@@ -142,9 +163,8 @@ struct IdentityOverrides {
 struct Controller {
   vhid::ControllerMapping mapping = vhid::ControllerMapping::identity();
   std::shared_ptr<vhid::HidProfile> profile;
+  std::unique_ptr<vhid::HidSourceDecoder> source_decoder;
   std::unique_ptr<vhid::VirtualDevice> device;
-  uint64_t input_count = 0;
-  uint64_t next_input_log_us = 0;
   uint32_t last_sequence = 0;
   bool have_sequence = false;
   bool raw_hid = false;
@@ -177,7 +197,8 @@ class Runtime {
       std::string error;
       const Route output_route = route;
       controller.device = vhid::VirtualDevice::create_raw(
-          properties, raw_output_handler(id, output_route), error);
+          properties, raw_output_handler(id, output_route),
+          get_report_handler(id), error);
       if (!controller.device) {
         std::cerr << "device " << id << ": " << error << '\n';
         return false;
@@ -196,6 +217,67 @@ class Runtime {
     return true;
   }
 
+  bool add_hid_source(uint32_t id, const vhid::ParsedHidDeviceAdd& source,
+                      const Route& route) {
+    std::string decode_error;
+    auto decoder = vhid::HidSourceDecoder::create(source, decode_error);
+    if (!decoder) {
+      if (!overrides_.profile_set &&
+          (source.header->flags & vhid::kHidAllowTransparentOutput)) {
+        std::cerr << "device " << id << ": HID source descriptor cannot be "
+                  << "decoded for profile conversion (" << decode_error
+                  << "); publishing transparent HID\n";
+        return add_raw(id, source, route);
+      }
+      std::cerr << "device " << id
+                << ": HID source descriptor cannot be decoded for profile "
+                   "conversion";
+      if (!decode_error.empty()) std::cerr << ": " << decode_error;
+      std::cerr << '\n';
+      return false;
+    }
+
+    std::lock_guard lock(mutex_);
+    vhid::DeviceDescription effective_description = decoder->description();
+    overrides_.apply(effective_description);
+    auto profile_unique = vhid::make_profile(effective_description);
+    if (!profile_unique) {
+      std::cerr << "device " << id
+                << ": requested output profile is not implemented yet\n";
+      return false;
+    }
+    auto profile =
+        std::shared_ptr<vhid::HidProfile>(std::move(profile_unique));
+    vhid::HidDeviceProperties properties = profile->properties();
+    overrides_.apply(properties);
+    Controller controller;
+    controller.profile = profile;
+    controller.source_decoder = std::move(decoder);
+    if (!dry_run_) {
+      std::string error;
+      const Route output_route = route;
+      controller.device = vhid::VirtualDevice::create_raw(
+          properties, raw_output_handler(id, output_route),
+          get_report_handler(id), error);
+      if (!controller.device) {
+        std::cerr << "device " << id << ": " << error << '\n';
+        return false;
+      }
+    }
+    controllers_[id] = std::move(controller);
+    std::cout << "HID source device " << id << " added: "
+              << std::string(source.product) << " -> " << properties.product
+              << " (profile "
+              << profile_name(effective_description.requested_profile)
+              << ", vid:pid " << vid_pid_string(properties)
+              << ", source descriptor " << source.descriptor.size()
+              << " bytes; " << unsigned(effective_description.button_count)
+              << " buttons, "
+              << unsigned(effective_description.hat_count) << " hats, "
+              << unsigned(effective_description.axis_count) << " axes)\n";
+    return true;
+  }
+
   bool add_raw(uint32_t id, const vhid::ParsedHidDeviceAdd& source,
                const Route& route) {
     std::lock_guard lock(mutex_);
@@ -203,9 +285,8 @@ class Runtime {
       std::cerr
           << "device " << id << ": --output-profile "
           << profile_name(overrides_.profile)
-          << " cannot be applied to a raw transparent HID source yet; "
-             "raw sources need a descriptor decoder before profile "
-             "conversion\n";
+          << " cannot be applied to transparent HID publication; use a "
+             "decoded HID source or semantic source for profile conversion\n";
       return false;
     }
     if (!(source.header->flags & vhid::kHidAllowTransparentOutput)) {
@@ -241,7 +322,8 @@ class Runtime {
     if (!dry_run_) {
       std::string error;
       controller.device = vhid::VirtualDevice::create_raw(
-          properties, raw_output_handler(id, route), error);
+          properties, raw_output_handler(id, route),
+          get_report_handler(id), error);
       if (!controller.device) {
         std::cerr << "device " << id << ": " << error << '\n';
         return false;
@@ -277,21 +359,34 @@ class Runtime {
             vhid::apply_mapping(state, controller.mapping));
     if (controller.device && !controller.device->send(report))
       std::cerr << "device " << id << ": failed to dispatch HID report\n";
-    log_input_progress(id, controller, "input");
   }
 
   void raw_input(uint32_t id, uint32_t sequence,
                  const vhid::ParsedHidReport& source) {
     std::lock_guard lock(mutex_);
     auto found = controllers_.find(id);
-    if (found == controllers_.end() || !found->second.raw_hid ||
+    if (found == controllers_.end() ||
         source.header->report_type !=
             static_cast<uint8_t>(vhid::HidReportType::input)) {
       return;
     }
     Controller& controller = found->second;
+    if (!controller.source_decoder && !controller.raw_hid) return;
     if (controller.have_sequence &&
         static_cast<int32_t>(sequence - controller.last_sequence) <= 0) {
+      return;
+    }
+    if (controller.source_decoder) {
+      vhid::InputState state{};
+      if (!controller.source_decoder->decode_input(source, state)) return;
+      controller.have_sequence = true;
+      controller.last_sequence = sequence;
+      const auto report =
+          controller.profile->encode(
+              vhid::apply_mapping(state, controller.mapping));
+      if (controller.device && !controller.device->send(report))
+        std::cerr << "device " << id
+                  << ": failed to dispatch decoded HID report\n";
       return;
     }
     controller.have_sequence = true;
@@ -303,37 +398,52 @@ class Runtime {
     report.insert(report.end(), source.data.begin(), source.data.end());
     if (controller.device && !controller.device->send(report))
       std::cerr << "device " << id << ": failed to dispatch raw HID report\n";
-    log_input_progress(id, controller, "raw HID input");
   }
 
  private:
-  void log_input_progress(uint32_t id, Controller& controller,
-                          const char* kind) {
-    const uint64_t count = ++controller.input_count;
-    const uint64_t timestamp = now_us();
-    if (count == 1 || timestamp >= controller.next_input_log_us) {
-      controller.next_input_log_us = timestamp + 1'000'000;
-      std::cout << "device " << id << ": " << kind << " report "
-                << count << '\n';
-    }
-  }
-
   vhid::VirtualDevice::RawReportHandler raw_output_handler(
       uint32_t id, Route route) {
     return [this, id, route](vhid::HidReportType type, uint8_t report_id,
                             std::span<const uint8_t> data) {
+      std::vector<uint8_t> response;
+      bool consumed = false;
+      {
+        std::lock_guard lock(mutex_);
+        auto found = controllers_.find(id);
+        if (found != controllers_.end() && found->second.profile) {
+          consumed = found->second.profile->handle_host_report(
+              type, report_id, data, response);
+          if (!response.empty() && found->second.device &&
+              !found->second.device->send(response)) {
+            std::cerr << "device " << id
+                      << ": failed to dispatch host response report\n";
+          }
+        }
+      }
+      if (consumed) return;
       if (!route.supports_output) {
         std::cerr << "device " << id
                   << ": output has no return path for this source\n";
         return;
       }
       const auto message = vhid::make_hid_report(
-          vhid::MessageType::hid_output_report, id,
+          vhid::MessageType::hid_output_report, route.source_device_id,
           output_sequence_.fetch_add(1), now_us(), type, report_id, data);
       if (!message.empty())
         sendto(route.socket, message.data(), message.size(), 0,
                reinterpret_cast<const sockaddr*>(&route.address),
                route.address_length);
+    };
+  }
+
+  vhid::VirtualDevice::RawGetReportHandler get_report_handler(uint32_t id) {
+    return [this, id](vhid::HidReportType type, uint8_t report_id,
+                      std::span<uint8_t> report, size_t& report_size) {
+      std::lock_guard lock(mutex_);
+      auto found = controllers_.find(id);
+      if (found == controllers_.end() || !found->second.profile) return false;
+      return found->second.profile->get_host_report(type, report_id, report,
+                                                    report_size);
     };
   }
 
@@ -362,8 +472,84 @@ int make_listener(const std::string& bind_host, uint16_t port) {
   return socket_fd;
 }
 
+bool same_endpoint(const sockaddr_storage& a, socklen_t a_length,
+                   const sockaddr_storage& b, socklen_t b_length) {
+  if (a.ss_family != b.ss_family || a.ss_family != AF_INET ||
+      a_length < sizeof(sockaddr_in) || b_length < sizeof(sockaddr_in)) {
+    return false;
+  }
+  const auto* left = reinterpret_cast<const sockaddr_in*>(&a);
+  const auto* right = reinterpret_cast<const sockaddr_in*>(&b);
+  return left->sin_port == right->sin_port &&
+         left->sin_addr.s_addr == right->sin_addr.s_addr;
+}
+
+std::string endpoint_label(const sockaddr_storage& address,
+                           socklen_t address_length) {
+  if (address.ss_family != AF_INET ||
+      address_length < sizeof(sockaddr_in)) {
+    return "unknown";
+  }
+  const auto* inet_address = reinterpret_cast<const sockaddr_in*>(&address);
+  char host[INET_ADDRSTRLEN]{};
+  if (!inet_ntop(AF_INET, &inet_address->sin_addr, host, sizeof(host))) {
+    return "unknown";
+  }
+  return std::string(host) + ":" + std::to_string(ntohs(inet_address->sin_port));
+}
+
+UdpSession* find_udp_session(std::vector<UdpSession>& sessions,
+                             const sockaddr_storage& address,
+                             socklen_t address_length) {
+  for (auto& session : sessions) {
+    if (same_endpoint(session.address, session.address_length, address,
+                      address_length)) {
+      return &session;
+    }
+  }
+  return nullptr;
+}
+
+SessionDevice* find_session_device(UdpSession& session, uint32_t source_id) {
+  for (auto& device : session.devices) {
+    if (device.source_id == source_id) return &device;
+  }
+  return nullptr;
+}
+
+uint32_t mapped_device_id(UdpSession& session, uint32_t source_id) {
+  if (SessionDevice* device = find_session_device(session, source_id))
+    return device->bridge_id;
+  return 0;
+}
+
+uint32_t reserve_device_id(UdpSession& session, uint32_t source_id,
+                           uint32_t& next_network_device_id) {
+  if (const uint32_t existing = mapped_device_id(session, source_id))
+    return existing;
+  uint32_t bridge_id = next_network_device_id++;
+  if (bridge_id == 0) bridge_id = next_network_device_id++;
+  session.devices.push_back(SessionDevice{source_id, bridge_id});
+  return bridge_id;
+}
+
+void forget_device_id(UdpSession& session, uint32_t source_id) {
+  session.devices.erase(
+      std::remove_if(session.devices.begin(), session.devices.end(),
+                     [source_id](const SessionDevice& device) {
+                       return device.source_id == source_id;
+                     }),
+      session.devices.end());
+}
+
+void remove_session_devices(Runtime& runtime, UdpSession& session) {
+  for (const auto& device : session.devices)
+    runtime.remove(device.bridge_id);
+  session.devices.clear();
+}
+
 bool resolve_udp_source(const std::string& spec, uint16_t default_port,
-                        RemoteUdpSource& out, std::string& error) {
+                        UdpSession& out, std::string& error) {
   std::string host = spec;
   uint16_t port = default_port;
   const size_t colon = spec.rfind(':');
@@ -395,22 +581,140 @@ bool resolve_udp_source(const std::string& spec, uint16_t default_port,
   out.address_length = static_cast<socklen_t>(result->ai_addrlen);
   freeaddrinfo(result);
   out.label = host + ":" + service;
+  out.session_id =
+      static_cast<uint32_t>((now_us() ^ static_cast<uint64_t>(getpid())) &
+                            0xffffffffu);
+  if (!out.session_id) out.session_id = 1;
   out.enabled = true;
   return true;
 }
 
-bool send_source_hello(int socket_fd, RemoteUdpSource& source) {
-  vhid::HelloPayload hello{};
-  hello.client_id = 1;
-  std::strncpy(hello.name, "vhid-bridge", sizeof(hello.name) - 1);
-  const auto message = vhid::make_message(
-      vhid::MessageType::hello, 0, source.sequence++, now_us(), hello);
+vhid::SessionPayload make_session_payload(uint32_t session_id) {
+  vhid::SessionPayload payload{};
+  payload.session_id = session_id;
+  payload.peer_id = kBridgePeerId;
+  payload.keepalive_interval_us =
+      static_cast<uint32_t>(kSessionKeepaliveUs);
+  payload.timeout_us = static_cast<uint32_t>(kSessionTimeoutUs);
+  std::strncpy(payload.name, "vhid-bridge", sizeof(payload.name) - 1);
+  return payload;
+}
+
+bool send_message_to(int socket_fd, const sockaddr_storage& address,
+                     socklen_t address_length, std::span<const uint8_t> data) {
   const ssize_t sent =
-      sendto(socket_fd, message.data(), message.size(), 0,
-             reinterpret_cast<const sockaddr*>(&source.address),
-             source.address_length);
-  source.last_hello_us = now_us();
-  return sent == static_cast<ssize_t>(message.size());
+      sendto(socket_fd, data.data(), data.size(), 0,
+             reinterpret_cast<const sockaddr*>(&address), address_length);
+  return sent == static_cast<ssize_t>(data.size());
+}
+
+bool send_empty_message_to(int socket_fd, const sockaddr_storage& address,
+                           socklen_t address_length, vhid::MessageType type,
+                           uint32_t sequence, uint64_t timestamp_us) {
+  vhid::MessageHeader message{
+      vhid::kWireMagic, vhid::kWireVersion, static_cast<uint8_t>(type),
+      0, 0, 0, sequence, timestamp_us};
+  return send_message_to(
+      socket_fd, address, address_length,
+      std::span<const uint8_t>(
+          reinterpret_cast<const uint8_t*>(&message), sizeof(message)));
+}
+
+bool send_session_open(int socket_fd, UdpSession& source) {
+  const auto payload = make_session_payload(source.session_id);
+  const auto message = vhid::make_message(
+      vhid::MessageType::session_open, 0, source.sequence++, now_us(),
+      payload);
+  const bool ok =
+      send_message_to(socket_fd, source.address, source.address_length,
+                      std::span<const uint8_t>(message.data(),
+                                               message.size()));
+  const uint64_t timestamp = now_us();
+  source.last_open_us = timestamp;
+  source.last_tx_us = timestamp;
+  source.open_sent = true;
+  return ok;
+}
+
+bool send_session_accept(int socket_fd, const sockaddr_storage& address,
+                         socklen_t address_length, uint32_t session_id,
+                         uint32_t sequence) {
+  const auto payload = make_session_payload(session_id);
+  const auto message =
+      vhid::make_message(vhid::MessageType::session_accept, 0, sequence,
+                         now_us(), payload);
+  return send_message_to(socket_fd, address, address_length,
+                         std::span<const uint8_t>(message.data(),
+                                                  message.size()));
+}
+
+bool send_session_ping(int socket_fd, UdpSession& source) {
+  const uint64_t timestamp = now_us();
+  const bool ok = send_empty_message_to(
+      socket_fd, source.address, source.address_length,
+      vhid::MessageType::session_ping, source.sequence++, timestamp);
+  source.last_ping_us = timestamp;
+  source.last_tx_us = timestamp;
+  return ok;
+}
+
+bool service_udp_session(int socket_fd, Runtime& runtime, UdpSession& source,
+                         bool reopen_on_timeout) {
+  if (!source.enabled) return true;
+  const uint64_t timestamp = now_us();
+  if (!source.open_sent) {
+    if (!send_session_open(socket_fd, source)) {
+      std::cerr << "warning: UDP session open to " << source.label
+                << " failed: " << std::strerror(errno) << '\n';
+    }
+    return true;
+  }
+  if (!source.active) {
+    if (timestamp - source.last_open_us >= kSessionOpenRetryUs) {
+      if (!send_session_open(socket_fd, source)) {
+        std::cerr << "warning: UDP session open to " << source.label
+                  << " failed: " << std::strerror(errno) << '\n';
+      }
+    }
+    return true;
+  }
+  if (source.last_rx_us &&
+      timestamp - source.last_rx_us >= kSessionTimeoutUs) {
+    remove_session_devices(runtime, source);
+    std::cerr << "warning: UDP session with " << source.label
+              << " timed out";
+    if (reopen_on_timeout) {
+      source.active = false;
+      source.open_sent = false;
+      std::cerr << "; reopening\n";
+      return true;
+    }
+    std::cerr << '\n';
+    return false;
+  }
+  const uint64_t last_activity =
+      std::max(source.last_rx_us, source.last_tx_us);
+  if (last_activity &&
+      timestamp - last_activity >= kSessionKeepaliveUs &&
+      timestamp - source.last_ping_us >= kSessionKeepaliveUs) {
+    if (!send_session_ping(socket_fd, source)) {
+      std::cerr << "warning: UDP session ping to " << source.label
+                << " failed: " << std::strerror(errno) << '\n';
+    }
+  }
+  return true;
+}
+
+void service_inbound_sessions(int socket_fd, Runtime& runtime,
+                              std::vector<UdpSession>& sessions) {
+  auto session = sessions.begin();
+  while (session != sessions.end()) {
+    if (service_udp_session(socket_fd, runtime, *session, false)) {
+      ++session;
+    } else {
+      session = sessions.erase(session);
+    }
+  }
 }
 
 bool parse_u16(const char* text, uint16_t& out) {
@@ -456,7 +760,9 @@ bool parse_profile(const std::string& text, vhid::DeviceProfile& out) {
   return true;
 }
 
-void consume_udp(int socket_fd, Runtime& runtime) {
+void consume_udp(int socket_fd, Runtime& runtime, UdpSession* configured_source,
+                 std::vector<UdpSession>& inbound_sessions,
+                 uint32_t& next_network_device_id) {
   std::array<uint8_t, vhid::kMaxDatagramSize> buffer{};
   sockaddr_storage source{};
   socklen_t source_length = sizeof(source);
@@ -471,33 +777,178 @@ void consume_udp(int socket_fd, Runtime& runtime) {
   }
   const auto type =
       static_cast<vhid::MessageType>(message.header->type);
-  Route route{socket_fd, source, source_length, true};
-  if (type == vhid::MessageType::hid_device_add) {
-    vhid::ParsedHidDeviceAdd source_device;
-    if (vhid::parse_hid_device_add(message.payload, source_device))
-      runtime.add_raw(message.header->device_id, source_device, route);
-  } else if (type == vhid::MessageType::semantic_device_add) {
-    vhid::DeviceDescription description{};
-    std::memcpy(&description, message.payload.data(), sizeof(description));
-    runtime.add_semantic(message.header->device_id, description, route);
-  } else if (type == vhid::MessageType::hid_device_remove) {
-    runtime.remove(message.header->device_id);
-  } else if (type == vhid::MessageType::hid_input_report) {
-    vhid::ParsedHidReport report;
-    if (vhid::parse_hid_report(message.payload, report))
-      runtime.raw_input(message.header->device_id, message.header->sequence,
-                        report);
-  } else if (type == vhid::MessageType::semantic_input_state) {
-    vhid::InputState state{};
-    std::memcpy(&state, message.payload.data(), sizeof(state));
-    runtime.input(message.header->device_id, message.header->sequence, state);
-  } else if (type == vhid::MessageType::ping) {
-    vhid::MessageHeader pong{
-        vhid::kWireMagic, vhid::kWireVersion,
-        static_cast<uint8_t>(vhid::MessageType::pong), 0, 0,
-        message.header->device_id, message.header->sequence, now_us()};
-    sendto(socket_fd, &pong, sizeof(pong), 0,
-           reinterpret_cast<const sockaddr*>(&source), source_length);
+  const uint64_t received_at = now_us();
+  UdpSession* session_source = nullptr;
+  bool session_is_configured = false;
+  if (configured_source && configured_source->enabled &&
+      same_endpoint(configured_source->address,
+                    configured_source->address_length,
+                    source, source_length)) {
+    session_source = configured_source;
+    session_source->last_rx_us = received_at;
+    session_is_configured = true;
+  } else if (configured_source && configured_source->enabled) {
+    return;
+  } else {
+    session_source =
+        find_udp_session(inbound_sessions, source, source_length);
+    if (session_source) session_source->last_rx_us = received_at;
+  }
+  switch (type) {
+    case vhid::MessageType::session_open: {
+      vhid::SessionPayload payload{};
+      std::memcpy(&payload, message.payload.data(), sizeof(payload));
+      if (!payload.session_id) return;
+      if (!session_source) {
+        UdpSession session;
+        session.address = source;
+        session.address_length = source_length;
+        session.label = endpoint_label(source, source_length);
+        session.enabled = true;
+        inbound_sessions.push_back(std::move(session));
+        session_source = &inbound_sessions.back();
+      }
+      const bool was_active = session_source->active;
+      const bool changing_session =
+          was_active && session_source->session_id != payload.session_id;
+      if (changing_session) remove_session_devices(runtime, *session_source);
+      if (changing_session || !was_active) session_source->sequence = 0;
+      session_source->session_id = payload.session_id;
+      session_source->last_rx_us = received_at;
+      const uint32_t sequence = session_source->sequence++;
+      if (send_session_accept(socket_fd, source, source_length,
+                              payload.session_id, sequence)) {
+        session_source->active = true;
+        session_source->open_sent = true;
+        session_source->last_tx_us = now_us();
+        if (changing_session || !was_active) {
+          std::cout << "UDP session opened by source "
+                    << session_source->label << '\n';
+        }
+      } else {
+        std::cerr << "warning: UDP session accept failed: "
+                  << std::strerror(errno) << '\n';
+      }
+      return;
+    }
+    case vhid::MessageType::session_accept: {
+      if (!session_source || !session_is_configured) return;
+      vhid::SessionPayload payload{};
+      std::memcpy(&payload, message.payload.data(), sizeof(payload));
+      if (payload.session_id != session_source->session_id) {
+        std::cerr << "warning: UDP session accept from "
+                  << session_source->label << " had unexpected session id\n";
+        return;
+      }
+      if (!session_source->active)
+        std::cout << "UDP session accepted by source "
+                  << session_source->label << '\n';
+      session_source->active = true;
+      session_source->open_sent = true;
+      return;
+    }
+    case vhid::MessageType::session_close:
+      if (session_source) {
+        remove_session_devices(runtime, *session_source);
+        std::cout << "UDP session closed by source "
+                  << session_source->label << '\n';
+        if (session_is_configured) {
+          session_source->active = false;
+          session_source->open_sent = false;
+        } else {
+          inbound_sessions.erase(
+              std::remove_if(inbound_sessions.begin(), inbound_sessions.end(),
+                             [&source, source_length](
+                                 const UdpSession& session) {
+                               return same_endpoint(
+                                   session.address, session.address_length,
+                                   source, source_length);
+                             }),
+              inbound_sessions.end());
+        }
+      }
+      return;
+    case vhid::MessageType::session_ping: {
+      if (!session_source || !session_source->active) return;
+      const uint64_t timestamp = now_us();
+      const uint32_t sequence = session_source->sequence++;
+      if (send_empty_message_to(socket_fd, source, source_length,
+                                vhid::MessageType::session_pong, sequence,
+                                timestamp)) {
+        session_source->last_tx_us = timestamp;
+      }
+      return;
+    }
+    case vhid::MessageType::session_pong:
+      return;
+    case vhid::MessageType::hid_device_add: {
+      if (!session_source || !session_source->active ||
+          !message.header->device_id) {
+        return;
+      }
+      vhid::ParsedHidDeviceAdd source_device;
+      if (!vhid::parse_hid_device_add(message.payload, source_device))
+        return;
+      const uint32_t source_id = message.header->device_id;
+      const bool known_device = mapped_device_id(*session_source, source_id);
+      const uint32_t bridge_id = reserve_device_id(
+          *session_source, source_id, next_network_device_id);
+      Route route{socket_fd, source, source_length, source_id, true};
+      if (!runtime.add_hid_source(bridge_id, source_device, route) &&
+          !known_device)
+        forget_device_id(*session_source, source_id);
+      return;
+    }
+    case vhid::MessageType::hid_device_remove: {
+      if (!session_source || !session_source->active) return;
+      const uint32_t source_id = message.header->device_id;
+      const uint32_t bridge_id = mapped_device_id(*session_source, source_id);
+      if (bridge_id) {
+        runtime.remove(bridge_id);
+        forget_device_id(*session_source, source_id);
+      }
+      return;
+    }
+    case vhid::MessageType::hid_input_report: {
+      if (!session_source || !session_source->active) return;
+      const uint32_t bridge_id =
+          mapped_device_id(*session_source, message.header->device_id);
+      if (!bridge_id) return;
+      vhid::ParsedHidReport report;
+      if (vhid::parse_hid_report(message.payload, report))
+        runtime.raw_input(bridge_id, message.header->sequence, report);
+      return;
+    }
+    case vhid::MessageType::hid_output_report:
+    case vhid::MessageType::hid_get_report:
+    case vhid::MessageType::hid_get_report_response:
+      return;
+    case vhid::MessageType::semantic_device_add: {
+      if (!session_source || !session_source->active ||
+          !message.header->device_id) {
+        return;
+      }
+      vhid::DeviceDescription description{};
+      std::memcpy(&description, message.payload.data(), sizeof(description));
+      const uint32_t source_id = message.header->device_id;
+      const bool known_device = mapped_device_id(*session_source, source_id);
+      const uint32_t bridge_id = reserve_device_id(
+          *session_source, source_id, next_network_device_id);
+      Route route{socket_fd, source, source_length, source_id, true};
+      if (!runtime.add_semantic(bridge_id, description, route) && !known_device)
+        forget_device_id(*session_source, source_id);
+      return;
+    }
+    case vhid::MessageType::semantic_input_state: {
+      if (!session_source || !session_source->active) return;
+      const uint32_t bridge_id =
+          mapped_device_id(*session_source, message.header->device_id);
+      if (!bridge_id) return;
+      vhid::InputState state{};
+      std::memcpy(&state, message.payload.data(), sizeof(state));
+      runtime.input(bridge_id, message.header->sequence, state);
+      return;
+    }
   }
 }
 
@@ -607,7 +1058,9 @@ int main(int argc, char** argv) {
     return 1;
   }
   Runtime runtime(dry_run, std::move(identity_overrides));
-  RemoteUdpSource udp_source;
+  UdpSession udp_source;
+  std::vector<UdpSession> inbound_sessions;
+  uint32_t next_network_device_id = kFirstNetworkDeviceId;
   if (!udp_source_spec.empty()) {
     std::string error;
     if (!resolve_udp_source(udp_source_spec, listen_port, udp_source, error)) {
@@ -615,10 +1068,7 @@ int main(int argc, char** argv) {
       close(udp_socket);
       return 2;
     }
-    if (!send_source_hello(udp_socket, udp_source)) {
-      std::cerr << "warning: UDP transport HELLO to " << udp_source.label
-                << " failed: " << std::strerror(errno) << '\n';
-    }
+    service_udp_session(udp_socket, runtime, udp_source, true);
   }
   std::unique_ptr<vhid::PhysicalHidSource> physical_source;
   if (physical) {
@@ -639,8 +1089,10 @@ int main(int argc, char** argv) {
   std::cout << "VHID UDP listening on " << bind_host << ':' << listen_port
             << (dry_run ? " (dry run)" : "") << '\n';
   if (udp_source.enabled) {
-    std::cout << "sending UDP transport HELLO to source " << udp_source.label
-              << " once per second";
+    std::cout << "opening UDP session with source " << udp_source.label
+              << " (idle keepalive "
+              << (kSessionKeepaliveUs / 1'000'000) << "s, timeout "
+              << (kSessionTimeoutUs / 1'000'000) << "s)";
     if (!bind_explicit) std::cout << " (auto-bound to 0.0.0.0)";
     std::cout << '\n';
   }
@@ -663,7 +1115,9 @@ int main(int argc, char** argv) {
       break;
     }
     if (FD_ISSET(udp_socket, &read_set))
-      consume_udp(udp_socket, runtime);
+      consume_udp(udp_socket, runtime,
+                  udp_source.enabled ? &udp_source : nullptr,
+                  inbound_sessions, next_network_device_id);
     if (read_stdin && FD_ISSET(STDIN_FILENO, &read_set)) {
       char input[64];
       const ssize_t n = read(STDIN_FILENO, input, sizeof(input));
@@ -671,12 +1125,8 @@ int main(int argc, char** argv) {
         if (input[i] == 'q' || input[i] == 'Q') stop_requested = 1;
       }
     }
-    if (udp_source.enabled && now_us() - udp_source.last_hello_us > 1'000'000) {
-      if (!send_source_hello(udp_socket, udp_source)) {
-        std::cerr << "warning: UDP transport HELLO to " << udp_source.label
-                  << " failed: " << std::strerror(errno) << '\n';
-      }
-    }
+    service_udp_session(udp_socket, runtime, udp_source, true);
+    service_inbound_sessions(udp_socket, runtime, inbound_sessions);
   }
   physical_source.reset();
   close(udp_socket);

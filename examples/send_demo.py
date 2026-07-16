@@ -1,24 +1,32 @@
 #!/usr/bin/env python3
-"""Minimal raw-HID-over-UDP sender using only Python's standard library."""
+"""Minimal HID-over-UDP source using only Python's standard library."""
 
 import argparse
 import math
+import random
 import socket
 import struct
 import time
 
 MAGIC = 0x32424856  # Versioned HID-over-UDP envelope.
 VERSION = 2
-HID_DEVICE_ADD = 2
-HID_DEVICE_REMOVE = 3
-HID_INPUT_REPORT = 4
+SESSION_OPEN = 1
+SESSION_ACCEPT = 2
+SESSION_CLOSE = 3
+SESSION_PING = 4
+SESSION_PONG = 5
+HID_DEVICE_ADD = 16
+HID_DEVICE_REMOVE = 17
+HID_INPUT_REPORT = 32
 HID_REPORT_INPUT = 0
 TRANSPORT_NETWORK = 4
 ALLOW_TRANSPARENT_OUTPUT = 1
 DEVICE_ID = 1
+KEEPALIVE_US = 5_000_000
+TIMEOUT_US = 15_000_000
 
 # 18 buttons followed by four signed 16-bit axes. The six-byte vendor output
-# report is included to demonstrate the bidirectional raw-HID contract.
+# report demonstrates the host output-report return path.
 REPORT_DESCRIPTOR = bytes(
     [
         0x05, 0x01,  # Generic Desktop
@@ -61,8 +69,32 @@ class HidUdpSender:
     def __init__(self, host: str, port: int, device_id: int):
         self.destination = (host, port)
         self.device_id = device_id
+        self.session_id = random.getrandbits(32) or 1
         self.sequence = 0
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    def open_session(self) -> None:
+        payload = struct.pack(
+            "<IIIII32s",
+            self.session_id,
+            2,
+            0,
+            KEEPALIVE_US,
+            TIMEOUT_US,
+            b"vhid-demo",
+        )
+        self.sock.settimeout(0.25)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            self._send(SESSION_OPEN, payload, device_id=0)
+            try:
+                packet, _ = self.sock.recvfrom(1400)
+            except socket.timeout:
+                continue
+            if self._accepted_session(packet):
+                self.sock.settimeout(None)
+                return
+        raise TimeoutError("bridge did not accept the UDP session")
 
     def add_controller(
         self,
@@ -74,7 +106,7 @@ class HidUdpSender:
         product: str,
         manufacturer: str,
         serial: str,
-        allow_transparent_output: bool = True,
+        allow_transparent_output: bool = False,
     ) -> None:
         product_bytes = product.encode("utf-8")
         manufacturer_bytes = manufacturer.encode("utf-8")
@@ -107,7 +139,29 @@ class HidUdpSender:
     def remove_controller(self) -> None:
         self._send(HID_DEVICE_REMOVE, b"")
 
-    def _send(self, message_type: int, payload: bytes) -> None:
+    def close_session(self) -> None:
+        self._send(SESSION_CLOSE, b"", device_id=0)
+
+    def _accepted_session(self, packet: bytes) -> bool:
+        if len(packet) < 28:
+            return False
+        magic, version, message_type, _, payload_size, device_id, _, _ = (
+            struct.unpack_from("<IBBHIIIQ", packet)
+        )
+        if (
+            magic != MAGIC or
+            version != VERSION or
+            message_type != SESSION_ACCEPT or
+            device_id != 0 or
+            payload_size != 52 or
+            len(packet) < 80
+        ):
+            return False
+        session_id, = struct.unpack_from("<I", packet, 28)
+        return session_id == self.session_id
+
+    def _send(self, message_type: int, payload: bytes,
+              device_id: int | None = None) -> None:
         header = struct.pack(
             "<IBBHIIIQ",
             MAGIC,
@@ -115,7 +169,7 @@ class HidUdpSender:
             message_type,
             0,
             len(payload),
-            self.device_id,
+            self.device_id if device_id is None else device_id,
             self.sequence,
             time.monotonic_ns() // 1000,
         )
@@ -148,6 +202,7 @@ def main() -> None:
     )
     args = parser.parse_args()
     sender = HidUdpSender(args.host, args.port, DEVICE_ID)
+    sender.open_session()
     sender.add_controller(
         descriptor=REPORT_DESCRIPTOR,
         vendor_id=0x1209,
@@ -170,6 +225,7 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     sender.remove_controller()
+    sender.close_session()
 
 
 if __name__ == "__main__":

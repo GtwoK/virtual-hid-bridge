@@ -8,9 +8,28 @@
 namespace vhid {
 namespace {
 
-// Switch 1 Pro USB HID report IDs and the 0x30 input layout follow
-// dekuNukem/Nintendo_Switch_Reverse_Engineering and the existing
-// Switchboard Switch 1 Pro implementation.
+constexpr uint8_t kInputSubcommandReply = 0x21;
+constexpr uint8_t kInputFull = 0x30;
+constexpr uint8_t kInputUsbResponse = 0x81;
+constexpr uint8_t kOutputRumbleSubcommand = 0x01;
+constexpr uint8_t kOutputRumble = 0x10;
+constexpr uint8_t kOutputUsbCommand = 0x80;
+constexpr uint8_t kUsbStatus = 0x01;
+constexpr uint8_t kUsbHandshake = 0x02;
+constexpr uint8_t kUsbBaudrate = 0x03;
+constexpr uint8_t kUsbNoTimeout = 0x04;
+constexpr uint8_t kUsbEnableTimeout = 0x05;
+constexpr uint8_t kSubRequestDeviceInfo = 0x02;
+constexpr uint8_t kSubSetInputMode = 0x03;
+constexpr uint8_t kSubSpiRead = 0x10;
+constexpr uint8_t kSubSetPlayerLeds = 0x30;
+constexpr uint8_t kSubGetPlayerLeds = 0x31;
+constexpr uint8_t kSubSetHomeLight = 0x38;
+constexpr uint8_t kSubEnableImu = 0x40;
+constexpr uint8_t kSubSetImuSensitivity = 0x41;
+constexpr uint8_t kSubEnableVibration = 0x48;
+constexpr uint8_t kSubGetRegulatedVoltage = 0x50;
+
 constexpr std::array<uint8_t, 203> kSwitchProReportDescriptor = {
     0x05, 0x01, 0x15, 0x00, 0x09, 0x04, 0xA1, 0x01,
     0x85, 0x30, 0x05, 0x01, 0x05, 0x09, 0x19, 0x01,
@@ -87,6 +106,46 @@ void append_i16(uint8_t* out, int16_t value) {
   out[1] = static_cast<uint8_t>(static_cast<uint16_t>(value) >> 8);
 }
 
+void encode_calibration_pair(uint8_t* out, uint16_t first,
+                             uint16_t second) {
+  out[0] = static_cast<uint8_t>(first);
+  out[1] = static_cast<uint8_t>(((first >> 8) & 0x0F) |
+                                ((second & 0x0F) << 4));
+  out[2] = static_cast<uint8_t>(second >> 4);
+}
+
+std::array<uint8_t, 18> make_stick_factory_calibration() {
+  constexpr uint16_t kCenter = 0x800;
+  constexpr uint16_t kRange = 0x600;
+  std::array<uint8_t, 18> data{};
+  encode_calibration_pair(&data[0], kRange, kRange);
+  encode_calibration_pair(&data[3], kCenter, kCenter);
+  encode_calibration_pair(&data[6], kRange, kRange);
+  encode_calibration_pair(&data[9], kCenter, kCenter);
+  encode_calibration_pair(&data[12], kRange, kRange);
+  encode_calibration_pair(&data[15], kRange, kRange);
+  return data;
+}
+
+std::array<uint8_t, 24> make_imu_factory_calibration() {
+  return {
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x40, 0x00, 0x40, 0x00, 0x40,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x3B, 0x34, 0x3B, 0x34, 0x3B, 0x34,
+  };
+}
+
+std::array<uint8_t, 6> make_stable_mac(const std::string& serial) {
+  uint32_t hash = 2166136261u;
+  for (const unsigned char value : serial) {
+    hash ^= value;
+    hash *= 16777619u;
+  }
+  return {0x98, 0xB6, 0xE9, static_cast<uint8_t>(hash >> 16),
+          static_cast<uint8_t>(hash >> 8), static_cast<uint8_t>(hash)};
+}
+
 int16_t clamp_i16(long value) {
   return static_cast<int16_t>(std::clamp(value, -32768l, 32767l));
 }
@@ -106,9 +165,14 @@ class SwitchProProfile final : public HidProfile {
     properties_.serial = bounded_string(description.serial,
                                         sizeof(description.serial),
                                         "vhid-switch-pro-1");
+    mac_ = make_stable_mac(properties_.serial);
     properties_.transport = "USB";
     properties_.report_descriptor.assign(kSwitchProReportDescriptor.begin(),
                                          kSwitchProReportDescriptor.end());
+    std::fill(std::begin(last_state_.hats), std::end(last_state_.hats),
+              uint8_t{8});
+    last_subcommand_reply_ = encode_subcommand_reply(0, 0x80);
+    timer_ = 0;
   }
 
   const HidDeviceProperties& properties() const override {
@@ -116,8 +180,9 @@ class SwitchProProfile final : public HidProfile {
   }
 
   std::vector<uint8_t> encode(const InputState& state) const override {
+    last_state_ = state;
     std::vector<uint8_t> report(64);
-    report[0] = 0x30;
+    report[0] = kInputFull;
     report[1] = timer_++;
     report[2] = switch_battery_connection(state.battery_percent);
 
@@ -171,7 +236,68 @@ class SwitchProProfile final : public HidProfile {
     return true;
   }
 
+  bool handle_host_report(HidReportType type, uint8_t report_id,
+                          std::span<const uint8_t> report,
+                          std::vector<uint8_t>& response) override {
+    if (type != HidReportType::output) return false;
+    const auto packet = report_with_id(report_id, report);
+    if (packet.empty()) return false;
+    const uint8_t command = packet[0];
+    const std::span<const uint8_t> payload(packet.data() + 1,
+                                           packet.size() - 1);
+    switch (command) {
+      case kOutputUsbCommand:
+        return handle_usb_command(payload, response);
+      case kOutputRumbleSubcommand:
+        return handle_subcommand(payload, response);
+      case kOutputRumble:
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  bool get_host_report(HidReportType type, uint8_t report_id,
+                       std::span<uint8_t> report,
+                       size_t& report_size) override {
+    if (type == HidReportType::input && report_id == kInputFull) {
+      return copy_get_report_payload(encode(last_state_), report,
+                                     report_size);
+    }
+    if (type == HidReportType::input && report_id == kInputSubcommandReply) {
+      return copy_get_report_payload(last_subcommand_reply_, report,
+                                     report_size);
+    }
+    if (type == HidReportType::feature && report_id == 0x02) {
+      return copy_get_report_payload(last_subcommand_reply_, report,
+                                     report_size);
+    }
+    return false;
+  }
+
  private:
+  static std::vector<uint8_t> report_with_id(
+      uint8_t report_id, std::span<const uint8_t> report) {
+    if (!report.empty() && report[0] == report_id)
+      return std::vector<uint8_t>(report.begin(), report.end());
+    std::vector<uint8_t> packet;
+    packet.reserve(report.size() + (report_id ? 1 : 0));
+    if (report_id) packet.push_back(report_id);
+    packet.insert(packet.end(), report.begin(), report.end());
+    return packet;
+  }
+
+  static bool copy_get_report_payload(const std::vector<uint8_t>& source,
+                                      std::span<uint8_t> report,
+                                      size_t& report_size) {
+    if (source.empty()) return false;
+    const size_t payload_size = source.size() - 1;
+    if (report.size() < payload_size) return false;
+    std::copy(source.begin() + 1, source.end(), report.begin());
+    report_size = payload_size;
+    return true;
+  }
+
   static void encode_motion(const InputState& state,
                             std::vector<uint8_t>& report) {
     const bool has_motion =
@@ -205,8 +331,147 @@ class SwitchProProfile final : public HidProfile {
     }
   }
 
+  bool handle_usb_command(std::span<const uint8_t> payload,
+                          std::vector<uint8_t>& response) {
+    if (payload.empty()) return true;
+    switch (payload[0]) {
+      case kUsbStatus:
+        response.assign(64, 0);
+        response[0] = kInputUsbResponse;
+        response[1] = kUsbStatus;
+        response[3] = 0x03;
+        for (size_t i = 0; i < mac_.size(); ++i)
+          response[4 + i] = mac_[mac_.size() - 1 - i];
+        return true;
+      case kUsbHandshake:
+      case kUsbBaudrate:
+        response.assign(64, 0);
+        response[0] = kInputUsbResponse;
+        response[1] = payload[0];
+        return true;
+      case kUsbNoTimeout:
+      case kUsbEnableTimeout:
+        return true;
+      default:
+        return true;
+    }
+  }
+
+  bool handle_subcommand(std::span<const uint8_t> payload,
+                         std::vector<uint8_t>& response) {
+    if (payload.size() < 10) return true;
+    const uint8_t subcommand = payload[9];
+    const std::span<const uint8_t> arguments(payload.data() + 10,
+                                             payload.size() - 10);
+    response = encode_subcommand_reply(subcommand, 0x80);
+    switch (subcommand) {
+      case kSubRequestDeviceInfo:
+        response[13] = 0x82;
+        response[15] = 0x03;
+        response[16] = 0x48;
+        response[17] = 0x03;
+        response[18] = 0x02;
+        std::copy(mac_.begin(), mac_.end(), response.begin() + 19);
+        response[25] = 0x01;
+        response[26] = 0x01;
+        break;
+      case kSubSetInputMode:
+        if (!arguments.empty()) input_mode_ = arguments[0];
+        break;
+      case kSubSpiRead:
+        response[13] = 0x90;
+        append_spi_read_response(arguments, response);
+        break;
+      case kSubSetPlayerLeds:
+        if (!arguments.empty()) player_leds_ = arguments[0];
+        break;
+      case kSubGetPlayerLeds:
+        response[13] = 0xB0;
+        response[15] = player_leds_;
+        break;
+      case kSubSetHomeLight:
+      case kSubSetImuSensitivity:
+        break;
+      case kSubEnableImu:
+        imu_enabled_ = !arguments.empty() && arguments[0] != 0;
+        break;
+      case kSubEnableVibration:
+        vibration_enabled_ = !arguments.empty() && arguments[0] != 0;
+        break;
+      case kSubGetRegulatedVoltage:
+        response[13] = 0xD0;
+        response[15] = 0x28;
+        response[16] = 0x05;
+        break;
+      default:
+        break;
+    }
+    last_subcommand_reply_ = response;
+    return true;
+  }
+
+  std::vector<uint8_t> encode_subcommand_reply(uint8_t subcommand,
+                                               uint8_t ack) const {
+    auto report = encode(last_state_);
+    report[0] = kInputSubcommandReply;
+    report[13] = ack;
+    report[14] = subcommand;
+    std::fill(report.begin() + 15, report.end(), uint8_t{0});
+    return report;
+  }
+
+  void append_spi_read_response(std::span<const uint8_t> arguments,
+                                std::vector<uint8_t>& response) const {
+    if (arguments.size() < 5) return;
+    const uint32_t address =
+        static_cast<uint32_t>(arguments[0]) |
+        (static_cast<uint32_t>(arguments[1]) << 8) |
+        (static_cast<uint32_t>(arguments[2]) << 16) |
+        (static_cast<uint32_t>(arguments[3]) << 24);
+    const size_t length = std::min<size_t>(arguments[4], 29);
+    response[15] = static_cast<uint8_t>(address);
+    response[16] = static_cast<uint8_t>(address >> 8);
+    response[17] = static_cast<uint8_t>(address >> 16);
+    response[18] = static_cast<uint8_t>(address >> 24);
+    response[19] = static_cast<uint8_t>(length);
+    std::fill(response.begin() + 20, response.begin() + 20 + length,
+              uint8_t{0xFF});
+    read_spi(address,
+             std::span<uint8_t>(response.data() + 20, length));
+  }
+
+  void read_spi(uint32_t address, std::span<uint8_t> out) const {
+    const auto sticks = make_stick_factory_calibration();
+    const auto imu = make_imu_factory_calibration();
+    overlay_spi(address, out, 0x603D, sticks);
+    overlay_spi(address, out, 0x6020, imu);
+  }
+
+  static void overlay_spi(uint32_t request_address, std::span<uint8_t> out,
+                          uint32_t region_address,
+                          std::span<const uint8_t> region) {
+    if (out.empty() || region.empty()) return;
+    const uint64_t request_begin = request_address;
+    const uint64_t request_end = request_begin + out.size();
+    const uint64_t region_begin = region_address;
+    const uint64_t region_end = region_begin + region.size();
+    const uint64_t copy_begin = std::max(request_begin, region_begin);
+    const uint64_t copy_end = std::min(request_end, region_end);
+    if (copy_begin >= copy_end) return;
+    std::copy(region.begin() + (copy_begin - region_begin),
+              region.begin() + (copy_end - region_begin),
+              out.begin() + (copy_begin - request_begin));
+  }
+
   HidDeviceProperties properties_{};
+  std::array<uint8_t, 6> mac_{};
+  mutable InputState last_state_{};
+  mutable std::vector<uint8_t> last_subcommand_reply_{};
   bool has_hat_ = false;
+  uint8_t input_mode_ = kInputFull;
+  uint8_t player_leds_ = 0;
+  bool imu_enabled_ = false;
+  bool vibration_enabled_ = false;
   mutable uint8_t timer_ = 0;
 };
 

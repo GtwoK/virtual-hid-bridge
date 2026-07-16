@@ -60,5 +60,53 @@ int main(void) {
     assert(size == sizeof(vhid_message_header_t));
     assert(packet[5] == VHID_MSG_HID_DEVICE_REMOVE);
     assert(read_u32_le(packet + 16) == 2);
+
+    vhid_sender_t session_sender;
+    vhid_sender_init(&session_sender, 99);
+    vhid_session_payload_t session = {0};
+    session.session_id = 0x12345678;
+    session.peer_id = 42;
+    session.keepalive_interval_us = 5000000;
+    session.timeout_us = 15000000;
+    size = vhid_make_session_open(
+        &session_sender, &session, 40, packet, sizeof(packet));
+    assert(size == sizeof(vhid_message_header_t) +
+                       sizeof(vhid_session_payload_t));
+    assert(packet[5] == VHID_MSG_SESSION_OPEN);
+    assert(read_u32_le(packet + 12) == 0);
+    assert(read_u32_le(packet + 16) == 0);
+    assert(read_u32_le(packet + sizeof(vhid_message_header_t)) ==
+           session.session_id);
+
+    size = vhid_make_session_accept(
+        &session_sender, &session, 50, packet, sizeof(packet));
+    assert(size == sizeof(vhid_message_header_t) +
+                       sizeof(vhid_session_payload_t));
+    assert(packet[5] == VHID_MSG_SESSION_ACCEPT);
+    assert(read_u32_le(packet + 12) == 0);
+    assert(read_u32_le(packet + 16) == 1);
+    assert(read_u32_le(packet + sizeof(vhid_message_header_t)) ==
+           session.session_id);
+
+    size = vhid_make_session_ping(
+        &session_sender, 60, packet, sizeof(packet));
+    assert(size == sizeof(vhid_message_header_t));
+    assert(packet[5] == VHID_MSG_SESSION_PING);
+    assert(read_u32_le(packet + 12) == 0);
+    assert(read_u32_le(packet + 16) == 2);
+
+    size = vhid_make_session_pong(
+        &session_sender, 70, packet, sizeof(packet));
+    assert(size == sizeof(vhid_message_header_t));
+    assert(packet[5] == VHID_MSG_SESSION_PONG);
+    assert(read_u32_le(packet + 12) == 0);
+    assert(read_u32_le(packet + 16) == 3);
+
+    size = vhid_make_session_close(
+        &session_sender, 80, packet, sizeof(packet));
+    assert(size == sizeof(vhid_message_header_t));
+    assert(packet[5] == VHID_MSG_SESSION_CLOSE);
+    assert(read_u32_le(packet + 12) == 0);
+    assert(read_u32_le(packet + 16) == 4);
     return 0;
 }

@@ -27,10 +27,11 @@ artifacts.
 
 ## HID-over-UDP Transport
 
-The public sender model is HID lifecycle calls plus HID reports. A sender adds a
-controller with a descriptor and identity, sends input reports, and removes the
-controller when it disappears. The versioned bytes on the socket are just the
-current wire envelope for those calls:
+The public sender model is a lightweight session plus HID lifecycle calls and
+HID reports. A sender opens a session, adds a controller with a descriptor and
+identity, sends input reports, and removes the controller when it disappears.
+The versioned bytes on the socket are just the current wire envelope for those
+calls:
 
 - `hid_device_add`: stable ID, identity properties and complete HID report
   descriptor
@@ -38,7 +39,8 @@ current wire envelope for those calls:
 - `hid_input_report`: report type, report ID and raw input bytes
 - `hid_output_report`: raw host output bytes returned to the source
 - `hid_get_report` / `hid_get_report_response`: feature/input report requests
-- `hello`, `ping`, `pong`: discovery/liveness foundation
+- `session_open`, `session_accept`, `session_close`: UDP session lifecycle
+- `session_ping`, `session_pong`: idle session keepalive
 
 The report ID is carried separately and the report payload never includes an
 ID prefix. Descriptors travel at device creation; realtime packets contain only
@@ -46,12 +48,12 @@ the controller ID, report metadata, sequencing/timestamp fields and report
 bytes. Complete input reports use latest-value-wins semantics, while lifecycle
 and output remain ordered.
 
-An optional semantic device/state message remains available for software that
-generates abstract controls but has no HID descriptor. It feeds the internal
-mapping model; it is not the universal wire representation.
+The optional semantic device/state messages support software that generates
+abstract controls but has no HID descriptor. They feed the internal mapping
+model; they are not the universal wire representation.
 
-The envelope remains necessary because HID itself does not define network
-device lifecycle, addressing, sequencing, timestamps or report return paths.
+The envelope is necessary because HID itself does not define network device
+lifecycle, addressing, sequencing, timestamps or report return paths.
 No adopted network transport supplies those pieces for arbitrary HID:
 
 - DSU/Cemuhook is useful for emulator adapters, but has a fixed controller
@@ -61,12 +63,13 @@ No adopted network transport supplies those pieces for arbitrary HID:
 - OSC is a transport vocabulary without a standard gamepad schema.
 
 Future adapters can accept DSU, OSC, WebSocket/JSON or remote-play input and
-produce either raw HID or the optional semantic state.
+produce either descriptor-backed HID source messages or the optional semantic
+state.
 
 ## Processing pipeline
 
 ```text
-IOHID physical source / HID-over-network / future source adapter
+IOHID physical source / UDP HID source / future source adapter
                          |
                          v
                  semantic InputState
@@ -78,14 +81,16 @@ IOHID physical source / HID-over-network / future source adapter
               selected profile encoder
                          |
                          v
-       IOHIDUserDevice now / HIDVirtualDevice later
+              macOS virtual HID publisher
                          |
                          v
              IOHID -> SDL / GameController / raw HID
 ```
 
 Each logical controller becomes a separate virtual HID device with its own
-descriptor, identity, mappings and calibration.
+descriptor, identity, mappings and calibration. Network controller IDs are
+local to their UDP session; the bridge maps them to process-local controller
+IDs before publishing virtual devices.
 
 ## Relationship to ViGEmBus
 
@@ -110,7 +115,8 @@ strategy.
 
 Raw HID transport does not imply clean passthrough. Normal operation is:
 
-1. decode the source controller's reports into semantic controls;
+1. decode the source controller's reports into semantic controls using the
+   announced HID report descriptor;
 2. apply user mappings, calibration, inversion and curves;
 3. encode a newly selected virtual-controller profile.
 

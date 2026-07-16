@@ -24,20 +24,22 @@ constexpr size_t kMaxHats = 4;
 constexpr size_t kMaxAxes = 16;
 
 enum class MessageType : uint8_t {
-  hello = 1,
-  hid_device_add = 2,
-  hid_device_remove = 3,
-  hid_input_report = 4,
-  hid_output_report = 5,
-  hid_get_report = 6,
-  hid_get_report_response = 7,
-  ping = 8,
-  pong = 9,
-  // Optional convenience source for software that has logical controls but
-  // no HID descriptor/reports of its own. Raw HID remains the primary sender
-  // model.
-  semantic_device_add = 10,
-  semantic_input_state = 11,
+  session_open = 1,
+  session_accept = 2,
+  session_close = 3,
+  session_ping = 4,
+  session_pong = 5,
+
+  hid_device_add = 16,
+  hid_device_remove = 17,
+
+  hid_input_report = 32,
+  hid_output_report = 33,
+  hid_get_report = 34,
+  hid_get_report_response = 35,
+
+  semantic_device_add = 48,
+  semantic_input_state = 49,
 };
 
 enum class HidReportType : uint8_t {
@@ -102,9 +104,12 @@ struct MessageHeader {
   uint64_t timestamp_us;
 };
 
-struct HelloPayload {
-  uint32_t client_id;
+struct SessionPayload {
+  uint32_t session_id;
+  uint32_t peer_id;
   uint32_t capabilities;
+  uint32_t keepalive_interval_us;
+  uint32_t timeout_us;
   char name[32];
 };
 
@@ -187,6 +192,7 @@ struct OutputState {
 #pragma pack(pop)
 
 static_assert(sizeof(MessageHeader) == 28);
+static_assert(sizeof(SessionPayload) == 52);
 static_assert(sizeof(HidDeviceAddHeader) == 14);
 static_assert(sizeof(HidReportHeader) == 4);
 static_assert(sizeof(AxisDescriptor) == 16);

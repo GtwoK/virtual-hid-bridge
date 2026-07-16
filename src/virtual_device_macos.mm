@@ -49,6 +49,22 @@ void set_usage_metadata(CFMutableDictionaryRef dictionary,
   CFRelease(pair);
 }
 
+bool convert_report_type(IOHIDReportType type, HidReportType& wire_type) {
+  switch (type) {
+    case kIOHIDReportTypeInput:
+      wire_type = HidReportType::input;
+      return true;
+    case kIOHIDReportTypeOutput:
+      wire_type = HidReportType::output;
+      return true;
+    case kIOHIDReportTypeFeature:
+      wire_type = HidReportType::feature;
+      return true;
+    default:
+      return false;
+  }
+}
+
 class MacVirtualDevice final : public VirtualDevice {
  public:
   MacVirtualDevice(IOHIDUserDeviceRef device, dispatch_semaphore_t cancelled)
@@ -92,12 +108,14 @@ std::unique_ptr<VirtualDevice> VirtualDevice::create(
         if (profile->decode_output(report, output) && output_handler)
           output_handler(output);
       },
+      {},
       error);
 }
 
 std::unique_ptr<VirtualDevice> VirtualDevice::create_raw(
     const HidDeviceProperties& properties,
     RawReportHandler report_handler,
+    RawGetReportHandler get_report_handler,
     std::string& error) {
   if (properties.report_descriptor.empty()) {
     error = "HID profile produced an empty report descriptor";
@@ -149,21 +167,31 @@ std::unique_ptr<VirtualDevice> VirtualDevice::create_raw(
         if (length < 0)
           return kIOReturnUnsupported;
         HidReportType wire_type;
-        switch (type) {
-          case kIOHIDReportTypeOutput:
-            wire_type = HidReportType::output;
-            break;
-          case kIOHIDReportTypeFeature:
-            wire_type = HidReportType::feature;
-            break;
-          default:
-            return kIOReturnUnsupported;
-        }
+        if (!convert_report_type(type, wire_type) ||
+            wire_type == HidReportType::input || report_id > UINT8_MAX)
+          return kIOReturnUnsupported;
         if (report_handler)
           report_handler(
               wire_type, static_cast<uint8_t>(report_id),
               std::span<const uint8_t>(
                   report, static_cast<size_t>(length)));
+        return kIOReturnSuccess;
+      });
+  IOHIDUserDeviceRegisterGetReportBlock(
+      device, ^IOReturn(IOHIDReportType type, uint32_t report_id,
+                        uint8_t* report, CFIndex* length) {
+        if (!length || *length < 0 || report_id > UINT8_MAX)
+          return kIOReturnUnsupported;
+        HidReportType wire_type;
+        if (!convert_report_type(type, wire_type) || !get_report_handler)
+          return kIOReturnUnsupported;
+        size_t report_size = static_cast<size_t>(*length);
+        if (!get_report_handler(wire_type, static_cast<uint8_t>(report_id),
+                                std::span<uint8_t>(report, report_size),
+                                report_size)) {
+          return kIOReturnUnsupported;
+        }
+        *length = static_cast<CFIndex>(report_size);
         return kIOReturnSuccess;
       });
   IOHIDUserDeviceSetDispatchQueue(device, queue);

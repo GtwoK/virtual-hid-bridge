@@ -9,22 +9,23 @@ them, then creates one virtual HID device per logical controller.
 This is an early but testable foundation:
 
 - physical USB and Bluetooth HID discovery through `IOHIDManager`
-- descriptor-and-raw-report HID over UDP on port `48660`
+- descriptor-backed HID source transport over UDP on port `48660`
 - one logical device per sender-provided device ID
 - generated generic HID gamepads with configurable buttons, hats, axes,
   battery, vendor-defined motion and rumble output
 - an initial Switch 1 Pro Controller output profile with Nintendo identity,
-  report descriptor and standard `0x30` input report encoding
+  report descriptor, standard `0x30` input report encoding and host setup
+  replies used by SDL-style Nintendo drivers
 - mapping/calibration core and unit tests
 - an entitlement-sensitive macOS virtual-device publisher for signed builds
 - a small AppKit UI that starts/stops the bridge, edits runtime settings and
   identity overrides, and shows bridge logs/device lifecycle
 
-Complete Switch host-output handling, PlayStation, Xbox and other exact output
-profiles, configuration persistence, authenticated networking and the full
+PlayStation, Xbox and other exact output profiles, richer Switch output
+translation, configuration persistence, authenticated networking and the full
 mapping UI are future milestones. A recognized profile needs its real
-descriptor, identity, input report layout and output protocol; changing only the
-displayed name or VID/PID is not enough.
+descriptor, identity, input report layout and output protocol; changing only
+the displayed name or VID/PID is not enough.
 
 ## Build
 
@@ -66,8 +67,10 @@ build/vhid-bridge
 python3 examples/send_demo.py
 ```
 
-For a network sender that waits for a Mac-side UDP transport HELLO, bind the
-helper on the LAN-facing interface and point it at the sender:
+UDP senders open a session, wait for `session_accept`, add controllers with HID
+descriptors, then send HID reports. For a network sender that waits for a
+Mac-side session open, bind the helper on the LAN-facing interface and point it
+at the sender:
 
 ```sh
 build/vhid-bridge --no-physical --udp-source SENDER_IP
@@ -75,9 +78,11 @@ build/vhid-bridge --no-physical --udp-source SENDER_IP
 
 `--bind` is the local Mac listen address. When `--udp-source` is used without an
 explicit `--bind`, the helper auto-binds to `0.0.0.0` so LAN senders can reply.
-`--udp-source` is the remote sender address; the helper sends a transport HELLO
-there once per second and receives HID device/report packets back on the same UDP
-socket.
+`--udp-source` is the remote sender address; the helper sends `session_open`
+there, waits for `session_accept`, then uses idle
+`session_ping`/`session_pong` keepalives. HID device/report packets travel on
+the same UDP socket after the session is active. Without `--udp-source`, the
+helper listens for sources that initiate `session_open`.
 
 Useful options:
 
@@ -87,13 +92,19 @@ Useful options:
 --dry-run           Parse and map without creating virtual devices
 --bind 0.0.0.0      Accept HID-over-UDP from trusted LAN devices
 --listen-port PORT  Listen on a custom UDP port
---udp-source HOST   Send a UDP transport HELLO to a source, HOST[:PORT]
+--udp-source HOST   Open a UDP session to a source, HOST[:PORT]
 --output-profile P  Select semantic output: generic, standard-gamepad, switch-pro
 ```
 
-`--output-profile` currently applies to physical HID sources and semantic UDP
-sources. Raw transparent HID-over-UDP sources still need a descriptor decoder
-before they can be converted into a different output profile.
+`--output-profile` applies to physical HID sources, descriptor-backed UDP HID
+sources and semantic UDP sources. The source controller descriptor defines the
+incoming controls; the selected output profile defines the virtual controller
+macOS and games see.
+
+The UI's `Source/default` choice uses the source-requested profile. Descriptor-
+backed UDP HID sources currently default to the generated generic profile.
+`Generic HID` and `Standard Gamepad` both use that generated generic profile
+until `Standard Gamepad` grows a separate fixed gamepad descriptor.
 
 Virtual-device identity overrides are available from both Terminal and the UI:
 
@@ -150,6 +161,9 @@ There is no universal packet layout shared by USB, Bluetooth and UDP.
   with its HID descriptor and identity, then sends ordinary HID input reports.
   The per-report envelope only carries the controller ID, report type, report
   ID, sequence and timestamp.
+- Descriptor-backed UDP HID sources are decoded into the same internal
+  `InputState` used by physical controllers, then mapped/calibrated and encoded
+  through the selected virtual output profile.
 
 The C-compatible sender helpers in `include/vhid/wire.h` keep that envelope out
 of application code. A UDP sender can usually be structured as:
@@ -157,15 +171,16 @@ of application code. A UDP sender can usually be structured as:
 ```c
 vhid_sender_t sender;
 vhid_sender_init(&sender, device_id);
+vhid_make_session_open(&sender, &session, timestamp_us, packet, sizeof(packet));
 vhid_make_hid_device_add(&sender, &device, timestamp_us, packet, sizeof(packet));
 vhid_make_hid_input_report(&sender, report_id, report, report_size,
                            timestamp_us, packet, sizeof(packet));
 vhid_make_hid_device_remove(&sender, timestamp_us, packet, sizeof(packet));
 ```
 
-The transport also retains an optional semantic message for software that
-generates abstract controls and has no HID reports of its own. It feeds the same
-internal mapping model but is not the primary transport.
+The transport also supports an optional semantic message for software that
+generates abstract controls and has no HID reports of its own. It feeds the
+same internal mapping model but is not the primary transport.
 
 The UDP protocol is not authenticated yet. Keep it loopback-only unless testing
 on a trusted isolated LAN.
@@ -177,10 +192,11 @@ on a trusted isolated LAN.
 - `src/physical_hid_source_macos.mm`: physical USB/Bluetooth HID source
 - `src/virtual_device_macos.mm`: entitlement-sensitive system publisher
 - `src/protocol.cpp`: HID-over-UDP envelope parser/builder
+- `src/hid_source_decoder.cpp`: descriptor-backed UDP HID source decoder
 - `src/mapping.cpp`: button routes and per-axis calibration
 - `src/generic_hid_profile.cpp`: generated build-your-own HID descriptor/reports
-- `src/switch_pro_profile.cpp`: initial Switch 1 Pro descriptor and report encoder
+- `src/switch_pro_profile.cpp`: Switch 1 Pro descriptor, report encoder and host setup replies
 - `include/vhid/wire.h`: C-compatible sender helpers and wire constants
 
-See `docs/handoff.md`, `docs/protocol.md` and `docs/architecture.md` for the
-current design and next implementation steps.
+See `docs/protocol.md` and `docs/architecture.md` for the current design and
+next implementation steps.

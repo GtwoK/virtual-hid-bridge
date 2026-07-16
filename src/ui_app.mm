@@ -484,7 +484,8 @@
 
 - (void)processLine:(NSString*)line {
   NSArray<NSTextCheckingResult*>* addMatches =
-      [self matches:@"(?:raw HID )?device ([0-9]+) added: ([^(]+)"
+      [self matches:@"(?:(?:raw HID|HID source) )?device ([0-9]+) "
+                     @"added: ([^(]+)"
                 line:line];
   if (addMatches.count) {
     NSTextCheckingResult* match = addMatches.firstObject;

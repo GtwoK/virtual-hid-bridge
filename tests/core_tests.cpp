@@ -5,6 +5,7 @@
 #include <iostream>
 
 #include "vhid/hid_profile.h"
+#include "vhid/hid_source_decoder.h"
 #include "vhid/mapping.h"
 #include "vhid/protocol.h"
 #include "vhid/wire.h"
@@ -60,6 +61,20 @@ void protocol_test() {
   assert(parsed.payload.size() == sizeof(description));
   assert(!vhid::parse_message(
       std::span<const uint8_t>(bytes.data(), bytes.size() - 1), parsed));
+
+  vhid::SessionPayload session{};
+  session.session_id = 0x12345678;
+  session.peer_id = 7;
+  session.keepalive_interval_us = 5'000'000;
+  session.timeout_us = 15'000'000;
+  std::strcpy(session.name, "test-session");
+  const auto session_open = vhid::make_message(
+      vhid::MessageType::session_open, 0, 8, 1100, session);
+  assert(vhid::parse_message(session_open, parsed));
+  assert(parsed.header->type ==
+         static_cast<uint8_t>(vhid::MessageType::session_open));
+  assert(parsed.header->device_id == 0);
+  assert(parsed.payload.size() == sizeof(session));
 
   auto profile = vhid::make_profile(description);
   assert(profile);
@@ -153,6 +168,125 @@ void wire_helper_test() {
   assert(parsed.header->sequence == 2);
 }
 
+void hid_source_decoder_test() {
+  vhid::DeviceDescription source_description{};
+  source_description.requested_profile =
+      static_cast<uint8_t>(vhid::DeviceProfile::generic);
+  source_description.button_count = 10;
+  source_description.hat_count = 1;
+  source_description.axis_count = 2;
+  source_description.vendor_id = 0x1209;
+  source_description.product_id = 0x5342;
+  source_description.version_number = 3;
+  std::strcpy(source_description.product, "Source Controller");
+  std::strcpy(source_description.manufacturer, "VHID");
+  std::strcpy(source_description.serial, "source-1");
+  source_description.axes[0].usage_page = 1;
+  source_description.axes[0].usage = 0x30;
+  source_description.axes[0].logical_min = INT16_MIN;
+  source_description.axes[0].logical_max = INT16_MAX;
+  source_description.axes[1].usage_page = 1;
+  source_description.axes[1].usage = 0x31;
+  source_description.axes[1].logical_min = INT16_MIN;
+  source_description.axes[1].logical_max = INT16_MAX;
+
+  auto source_profile = vhid::make_profile(source_description);
+  assert(source_profile);
+  vhid::HidDeviceAddHeader device{
+      .vendor_id = 0x1209,
+      .product_id = 0x5342,
+      .version_number = 3,
+      .transport = static_cast<uint8_t>(vhid::HidTransport::network),
+  };
+  const auto add = vhid::make_hid_device_add(
+      77, 1, 1000, device, source_profile->properties().report_descriptor,
+      "Source Controller", "VHID", "source-1");
+  vhid::ParsedMessage parsed;
+  assert(vhid::parse_message(add, parsed));
+  vhid::ParsedHidDeviceAdd parsed_device;
+  assert(vhid::parse_hid_device_add(parsed.payload, parsed_device));
+  std::string error;
+  auto decoder = vhid::HidSourceDecoder::create(parsed_device, error);
+  assert(decoder);
+  const auto& decoded_description = decoder->description();
+  assert(decoded_description.vendor_id == 0x1209);
+  assert(decoded_description.product_id == 0x5342);
+  assert(decoded_description.version_number == 3);
+  assert(decoded_description.button_count == 10);
+  assert(decoded_description.hat_count == 1);
+  assert(decoded_description.axis_count == 2);
+  assert(decoded_description.axes[0].usage == 0x30);
+  assert(decoded_description.axes[1].usage == 0x31);
+
+  vhid::InputState source_state{};
+  std::fill(std::begin(source_state.hats), std::end(source_state.hats),
+            uint8_t{8});
+  source_state.buttons = (uint64_t{1} << 0) | (uint64_t{1} << 3) |
+                         (uint64_t{1} << 9);
+  source_state.hats[0] = 2;
+  source_state.axes[0] = 12345;
+  source_state.axes[1] = -12000;
+  auto input_report = source_profile->encode(source_state);
+  const auto input = vhid::make_hid_report(
+      vhid::MessageType::hid_input_report, 77, 2, 1100,
+      vhid::HidReportType::input, 0, input_report);
+  assert(vhid::parse_message(input, parsed));
+  vhid::ParsedHidReport parsed_report;
+  assert(vhid::parse_hid_report(parsed.payload, parsed_report));
+  vhid::InputState decoded{};
+  assert(decoder->decode_input(parsed_report, decoded));
+  assert(decoded.buttons == source_state.buttons);
+  assert(decoded.hats[0] == 2);
+  assert(decoded.axes[0] == source_state.axes[0]);
+  assert(decoded.axes[1] == source_state.axes[1]);
+}
+
+void hid_source_array_button_test() {
+  const uint8_t descriptor[] = {
+      0x05, 0x01, 0x09, 0x05, 0xA1, 0x01,
+      0x05, 0x09, 0x19, 0x01, 0x29, 0x04,
+      0x15, 0x00, 0x25, 0x04, 0x75, 0x08,
+      0x95, 0x02, 0x81, 0x00, 0xC0,
+  };
+  vhid::HidDeviceAddHeader device{
+      .vendor_id = 0x1209,
+      .product_id = 0x5342,
+      .version_number = 1,
+      .transport = static_cast<uint8_t>(vhid::HidTransport::network),
+  };
+  const auto add = vhid::make_hid_device_add(
+      78, 1, 1000, device, descriptor, "Array Controller", "VHID",
+      "array-1");
+  vhid::ParsedMessage parsed;
+  assert(vhid::parse_message(add, parsed));
+  vhid::ParsedHidDeviceAdd parsed_device;
+  assert(vhid::parse_hid_device_add(parsed.payload, parsed_device));
+  std::string error;
+  auto decoder = vhid::HidSourceDecoder::create(parsed_device, error);
+  assert(decoder);
+  assert(decoder->description().button_count == 4);
+
+  const uint8_t first_buttons[] = {1, 4};
+  const auto first = vhid::make_hid_report(
+      vhid::MessageType::hid_input_report, 78, 2, 1100,
+      vhid::HidReportType::input, 0, first_buttons);
+  assert(vhid::parse_message(first, parsed));
+  vhid::ParsedHidReport parsed_report;
+  assert(vhid::parse_hid_report(parsed.payload, parsed_report));
+  vhid::InputState decoded{};
+  assert(decoder->decode_input(parsed_report, decoded));
+  assert(decoded.buttons == ((uint64_t{1} << 0) | (uint64_t{1} << 3)));
+
+  const uint8_t second_buttons[] = {0, 2};
+  const auto second = vhid::make_hid_report(
+      vhid::MessageType::hid_input_report, 78, 3, 1200,
+      vhid::HidReportType::input, 0, second_buttons);
+  assert(vhid::parse_message(second, parsed));
+  assert(vhid::parse_hid_report(parsed.payload, parsed_report));
+  assert(decoder->decode_input(parsed_report, decoded));
+  assert(decoded.buttons == (uint64_t{1} << 1));
+}
+
 void mapping_test() {
   vhid::InputState source{};
   source.buttons = (uint64_t{1} << 0) | (uint64_t{1} << 20);
@@ -235,6 +369,17 @@ void switch_profile_test() {
   assert(neutral_report[11] == 0x80);
   assert(neutral_report[12] == 0x09);
 
+  vhid::InputState face{};
+  std::fill(std::begin(face.hats), std::end(face.hats), uint8_t{8});
+  face.buttons = uint64_t{1} << 0;
+  assert(profile->encode(face)[3] == 0x04);
+  face.buttons = uint64_t{1} << 1;
+  assert(profile->encode(face)[3] == 0x08);
+  face.buttons = uint64_t{1} << 2;
+  assert(profile->encode(face)[3] == 0x01);
+  face.buttons = uint64_t{1} << 3;
+  assert(profile->encode(face)[3] == 0x02);
+
   vhid::InputState buttons{};
   std::fill(std::begin(buttons.hats), std::end(buttons.hats), uint8_t{8});
   buttons.buttons = (uint64_t{1} << 0) | (uint64_t{1} << 1) |
@@ -247,7 +392,6 @@ void switch_profile_test() {
                     (uint64_t{1} << 14) | (uint64_t{1} << 15) |
                     (uint64_t{1} << 16) | (uint64_t{1} << 17);
   const auto button_report = profile->encode(buttons);
-  assert(button_report[1] == 1);
   assert(button_report[3] == 0xCF);
   assert(button_report[4] == 0x3F);
   assert(button_report[5] == 0xCF);
@@ -258,6 +402,17 @@ void switch_profile_test() {
   const auto hat_report = profile->encode(hat);
   assert((hat_report[5] & 0x0F) == 0x06);
 
+  vhid::InputState dpad{};
+  std::fill(std::begin(dpad.hats), std::end(dpad.hats), uint8_t{8});
+  dpad.buttons = uint64_t{1} << 12;
+  assert((profile->encode(dpad)[5] & 0x0F) == 0x02);
+  dpad.buttons = uint64_t{1} << 13;
+  assert((profile->encode(dpad)[5] & 0x0F) == 0x01);
+  dpad.buttons = uint64_t{1} << 14;
+  assert((profile->encode(dpad)[5] & 0x0F) == 0x08);
+  dpad.buttons = uint64_t{1} << 15;
+  assert((profile->encode(dpad)[5] & 0x0F) == 0x04);
+
   vhid::InputState sticks{};
   std::fill(std::begin(sticks.hats), std::end(sticks.hats), uint8_t{8});
   sticks.axes[0] = INT16_MAX;
@@ -266,6 +421,57 @@ void switch_profile_test() {
   assert(stick_report[6] == 0xFF);
   assert(stick_report[7] == 0x0D);
   assert(stick_report[8] == 0x20);
+
+  std::vector<uint8_t> response;
+  const uint8_t usb_status[] = {0x01};
+  assert(profile->handle_host_report(vhid::HidReportType::output, 0x80,
+                                     usb_status, response));
+  assert(response.size() == 64);
+  assert(response[0] == 0x81);
+  assert(response[1] == 0x01);
+  assert(response[3] == 0x03);
+
+  response.clear();
+  const uint8_t usb_handshake[] = {0x02};
+  assert(profile->handle_host_report(vhid::HidReportType::output, 0x80,
+                                     usb_handshake, response));
+  assert(response.size() == 64);
+  assert(response[0] == 0x81);
+  assert(response[1] == 0x02);
+
+  response.clear();
+  uint8_t device_info[10]{};
+  device_info[9] = 0x02;
+  assert(profile->handle_host_report(vhid::HidReportType::output, 0x01,
+                                     device_info, response));
+  assert(response.size() == 64);
+  assert(response[0] == 0x21);
+  assert(response[13] == 0x82);
+  assert(response[14] == 0x02);
+  assert(response[17] == 0x03);
+
+  response.clear();
+  uint8_t spi_read[15]{};
+  spi_read[9] = 0x10;
+  spi_read[10] = 0x3D;
+  spi_read[11] = 0x60;
+  spi_read[14] = 18;
+  assert(profile->handle_host_report(vhid::HidReportType::output, 0x01,
+                                     spi_read, response));
+  assert(response.size() == 64);
+  assert(response[0] == 0x21);
+  assert(response[13] == 0x90);
+  assert(response[14] == 0x10);
+  assert(response[15] == 0x3D);
+  assert(response[16] == 0x60);
+  assert(response[19] == 18);
+  assert(response[20] != 0xFF);
+
+  uint8_t get_report[63]{};
+  size_t get_report_size = sizeof(get_report);
+  assert(profile->get_host_report(vhid::HidReportType::input, 0x30,
+                                  get_report, get_report_size));
+  assert(get_report_size == 63);
 }
 
 }  // namespace
@@ -273,6 +479,8 @@ void switch_profile_test() {
 int main() {
   protocol_test();
   wire_helper_test();
+  hid_source_decoder_test();
+  hid_source_array_button_test();
   mapping_test();
   profile_test();
   switch_profile_test();

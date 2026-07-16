@@ -33,6 +33,24 @@ class HidProfile {
   virtual std::vector<uint8_t> encode(const InputState& state) const = 0;
   virtual bool decode_output(std::span<const uint8_t> report,
                              OutputState& output) const = 0;
+  virtual bool handle_host_report(HidReportType type, uint8_t report_id,
+                                  std::span<const uint8_t> report,
+                                  std::vector<uint8_t>& response) {
+    (void)type;
+    (void)report_id;
+    (void)report;
+    (void)response;
+    return false;
+  }
+  virtual bool get_host_report(HidReportType type, uint8_t report_id,
+                               std::span<uint8_t> report,
+                               size_t& report_size) {
+    (void)type;
+    (void)report_id;
+    (void)report;
+    (void)report_size;
+    return false;
+  }
 };
 
 std::unique_ptr<HidProfile> make_profile(
@@ -43,6 +61,8 @@ class VirtualDevice {
   using OutputHandler = std::function<void(const OutputState&)>;
   using RawReportHandler =
       std::function<void(HidReportType, uint8_t, std::span<const uint8_t>)>;
+  using RawGetReportHandler =
+      std::function<bool(HidReportType, uint8_t, std::span<uint8_t>, size_t&)>;
 
   virtual ~VirtualDevice() = default;
   virtual bool send(std::span<const uint8_t> report) = 0;
@@ -55,6 +75,7 @@ class VirtualDevice {
   static std::unique_ptr<VirtualDevice> create_raw(
       const HidDeviceProperties& properties,
       RawReportHandler report_handler,
+      RawGetReportHandler get_report_handler,
       std::string& error);
 };
 

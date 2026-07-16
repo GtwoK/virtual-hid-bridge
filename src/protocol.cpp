@@ -46,28 +46,32 @@ bool parse_message(std::span<const uint8_t> bytes, ParsedMessage& out) {
   const auto type = static_cast<MessageType>(header->type);
   size_t expected = 0;
   switch (type) {
-    case MessageType::hello:
-      expected = sizeof(HelloPayload);
+    case MessageType::session_open:
+    case MessageType::session_accept:
+      expected = sizeof(SessionPayload);
+      break;
+    case MessageType::session_close:
+    case MessageType::session_ping:
+    case MessageType::session_pong:
+      expected = 0;
       break;
     case MessageType::hid_device_add:
+      expected = SIZE_MAX;
+      break;
+    case MessageType::hid_device_remove:
+      expected = 0;
+      break;
     case MessageType::hid_input_report:
     case MessageType::hid_output_report:
     case MessageType::hid_get_report:
     case MessageType::hid_get_report_response:
       expected = SIZE_MAX;
       break;
-    case MessageType::hid_device_remove:
-      expected = 0;
-      break;
     case MessageType::semantic_device_add:
       expected = sizeof(DeviceDescription);
       break;
     case MessageType::semantic_input_state:
       expected = sizeof(InputState);
-      break;
-    case MessageType::ping:
-    case MessageType::pong:
-      expected = 0;
       break;
     default:
       return false;
@@ -76,14 +80,7 @@ bool parse_message(std::span<const uint8_t> bytes, ParsedMessage& out) {
   out.header = header;
   out.payload =
       bytes.subspan(sizeof(MessageHeader), header->payload_size);
-  if (type == MessageType::semantic_device_add) {
-    DeviceDescription description{};
-    std::memcpy(&description, out.payload.data(), sizeof(description));
-    if (!valid_device_description(description)) {
-      out = {};
-      return false;
-    }
-  } else if (type == MessageType::hid_device_add) {
+  if (type == MessageType::hid_device_add) {
     ParsedHidDeviceAdd device;
     if (!parse_hid_device_add(out.payload, device)) {
       out = {};
@@ -95,6 +92,13 @@ bool parse_message(std::span<const uint8_t> bytes, ParsedMessage& out) {
              type == MessageType::hid_get_report_response) {
     ParsedHidReport report;
     if (!parse_hid_report(out.payload, report)) {
+      out = {};
+      return false;
+    }
+  } else if (type == MessageType::semantic_device_add) {
+    DeviceDescription description{};
+    std::memcpy(&description, out.payload.data(), sizeof(description));
+    if (!valid_device_description(description)) {
       out = {};
       return false;
     }

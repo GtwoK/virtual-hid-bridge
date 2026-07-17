@@ -1,4 +1,5 @@
-#include "vhid/hid_source_decoder.h"
+#include "vhid/source_codec.h"
+#include "vhid/haptics.h"
 
 #include <algorithm>
 #include <array>
@@ -11,11 +12,18 @@
 #include <vector>
 
 namespace vhid {
+
+std::vector<uint8_t> make_switch2_pro_rumble_report(
+    const OutputState& output, uint8_t sequence);
+
 namespace {
 
 constexpr uint32_t kPageGenericDesktop = 0x01;
 constexpr uint32_t kPageButton = 0x09;
 constexpr uint32_t kPageSensors = 0x20;
+constexpr uint16_t kNintendoVendorId = 0x057e;
+constexpr uint16_t kSwitchProProductId = 0x2009;
+constexpr uint16_t kSwitch2ProProductId = 0x2069;
 constexpr uint32_t kUsageHatSwitch = 0x39;
 constexpr uint32_t kUsageAccelerationAxisX = 0x0453;
 constexpr uint32_t kUsageAccelerationAxisY = 0x0454;
@@ -25,6 +33,9 @@ constexpr uint32_t kUsageAngularVelocityY = 0x0458;
 constexpr uint32_t kUsageAngularVelocityZ = 0x0459;
 constexpr double kMetersPerGravity = 9.80665;
 constexpr double kRadiansPerDegree = 0.017453292519943295;
+constexpr float kSwitchAccelCountsPerGravity = 4096.0f;
+constexpr float kSwitchGyroCountsPerDegreeSecond = 13371.0f / 936.0f;
+constexpr float kSwitch2GyroRadiansPerSecond = 34.8f;
 
 enum class FieldKind { button, button_array, hat, axis, motion };
 
@@ -205,14 +216,133 @@ void copy_text(char* out, size_t out_size, std::string_view value) {
   std::memcpy(out, value.data(), copy_size);
 }
 
-class GenericHidSourceDecoder final : public HidSourceDecoder {
+int16_t read_i16(std::span<const uint8_t> data, size_t offset) {
+  if (offset + 2 > data.size()) return 0;
+  const uint16_t value =
+      static_cast<uint16_t>(data[offset]) |
+      (static_cast<uint16_t>(data[offset + 1]) << 8);
+  return static_cast<int16_t>(value);
+}
+
+uint16_t read_u12_stick(const uint8_t* in, bool y) {
+  if (y)
+    return static_cast<uint16_t>(((in[1] >> 4) | (in[2] << 4)) & 0x0fffu);
+  return static_cast<uint16_t>((in[0] | ((in[1] & 0x0f) << 8)) & 0x0fffu);
+}
+
+int16_t normalize_switch_stick(uint16_t value) {
+  const long scaled =
+      std::lround((static_cast<long>(value) - 2048l) * 32768.0 / 1536.0);
+  return static_cast<int16_t>(std::clamp(scaled, -32768l, 32767l));
+}
+
+int16_t invert_axis(int16_t value) {
+  return static_cast<int16_t>(~value);
+}
+
+void set_button(uint64_t& buttons, uint8_t index, bool pressed) {
+  const uint64_t mask = uint64_t{1} << index;
+  if (pressed)
+    buttons |= mask;
+  else
+    buttons &= ~mask;
+}
+
+uint8_t switch_battery_percent(uint8_t battery_connection) {
+  switch (battery_connection & 0xf0) {
+    case 0x80:
+      return 100;
+    case 0x60:
+      return 60;
+    case 0x40:
+      return 30;
+    case 0x20:
+      return 10;
+    default:
+      return 0;
+  }
+}
+
+uint8_t dpad_hat(bool up, bool right, bool down, bool left) {
+  if (up && right && !down && !left) return 1;
+  if (right && down && !up && !left) return 3;
+  if (down && left && !up && !right) return 5;
+  if (left && up && !right && !down) return 7;
+  if (up && !right && !down && !left) return 0;
+  if (right && !up && !down && !left) return 2;
+  if (down && !up && !right && !left) return 4;
+  if (left && !up && !right && !down) return 6;
+  return 8;
+}
+
+void fill_switch_description(DeviceDescription& description,
+                             const ParsedHidDeviceAdd& source) {
+  description = {};
+  description.requested_profile =
+      static_cast<uint8_t>(DeviceProfile::switch_pro);
+  description.device_flags =
+      kDeviceHasBattery | kDeviceHasMotion | kDeviceHasRumble;
+  description.button_count = 18;
+  description.axis_count = 4;
+  description.motion_flags = kMotionAcceleration | kMotionAngularVelocity;
+  description.vendor_id = source.header->vendor_id;
+  description.product_id = source.header->product_id;
+  description.version_number = source.header->version_number;
+  copy_text(description.product, sizeof(description.product), source.product);
+  copy_text(description.manufacturer, sizeof(description.manufacturer),
+            source.manufacturer);
+  copy_text(description.serial, sizeof(description.serial), source.serial);
+  const uint16_t usages[] = {0x30, 0x31, 0x32, 0x35};
+  for (size_t i = 0; i < std::size(usages); ++i) {
+    description.axes[i].usage_page = kPageGenericDesktop;
+    description.axes[i].usage = usages[i];
+    description.axes[i].logical_min = INT16_MIN;
+    description.axes[i].logical_max = INT16_MAX;
+  }
+}
+
+void fill_switch2_description(DeviceDescription& description,
+                              const ParsedHidDeviceAdd& source) {
+  description = {};
+  description.requested_profile =
+      static_cast<uint8_t>(DeviceProfile::switch_2_pro);
+  description.device_flags = kDeviceHasMotion | kDeviceHasRumble;
+  description.button_count = 21;
+  description.hat_count = 1;
+  description.axis_count = 4;
+  description.motion_flags = kMotionAcceleration | kMotionAngularVelocity;
+  description.vendor_id = source.header->vendor_id;
+  description.product_id = source.header->product_id;
+  description.version_number = source.header->version_number;
+  const std::string_view product =
+      source.product.empty() ? std::string_view("Nintendo Switch 2 Pro Controller")
+                             : source.product;
+  const std::string_view manufacturer =
+      source.manufacturer.empty() ? std::string_view("Nintendo Co., Ltd.")
+                                  : source.manufacturer;
+  copy_text(description.product, sizeof(description.product), product);
+  copy_text(description.manufacturer, sizeof(description.manufacturer),
+            manufacturer);
+  copy_text(description.serial, sizeof(description.serial), source.serial);
+  const uint16_t usages[] = {0x30, 0x31, 0x33, 0x34};
+  for (size_t i = 0; i < std::size(usages); ++i) {
+    description.axes[i].usage_page = kPageGenericDesktop;
+    description.axes[i].usage = usages[i];
+    description.axes[i].logical_min = INT16_MIN;
+    description.axes[i].logical_max = INT16_MAX;
+  }
+}
+
+class DescriptorSourceCodec final : public SourceInputCodec {
  public:
-  GenericHidSourceDecoder(DeviceDescription description,
-                          std::vector<Field> fields)
+  DescriptorSourceCodec(DeviceDescription description,
+                        std::vector<Field> fields)
       : description_(description),
         fields_(std::move(fields)) {
     std::fill(std::begin(state_.hats), std::end(state_.hats), uint8_t{8});
   }
+
+  DeviceProfile profile() const override { return DeviceProfile::generic; }
 
   const DeviceDescription& description() const override {
     return description_;
@@ -316,6 +446,174 @@ class GenericHidSourceDecoder final : public HidSourceDecoder {
  private:
   DeviceDescription description_{};
   std::vector<Field> fields_;
+  InputState state_{};
+};
+
+class SwitchProSourceCodec final : public SourceInputCodec {
+ public:
+  explicit SwitchProSourceCodec(const ParsedHidDeviceAdd& source) {
+    fill_switch_description(description_, source);
+    std::fill(std::begin(state_.hats), std::end(state_.hats), uint8_t{8});
+  }
+
+  DeviceProfile profile() const override { return DeviceProfile::switch_pro; }
+
+  const DeviceDescription& description() const override {
+    return description_;
+  }
+
+  bool decode_input(const ParsedHidReport& report,
+                    InputState& state) override {
+    if (report.header->report_type !=
+        static_cast<uint8_t>(HidReportType::input)) {
+      return false;
+    }
+    std::span<const uint8_t> packet = report.data;
+    if (report.header->report_id == 0x30) {
+      if (packet.size() < 63) return false;
+    } else if (!packet.empty() && packet[0] == 0x30) {
+      packet = packet.subspan(1);
+      if (packet.size() < 63) return false;
+    } else {
+      return false;
+    }
+
+    uint64_t buttons = 0;
+    const uint8_t right = packet[2];
+    const uint8_t shared = packet[3];
+    const uint8_t left = packet[4];
+    set_button(buttons, 2, right & 0x01);
+    set_button(buttons, 3, right & 0x02);
+    set_button(buttons, 0, right & 0x04);
+    set_button(buttons, 1, right & 0x08);
+    set_button(buttons, 5, right & 0x40);
+    set_button(buttons, 7, right & 0x80);
+    set_button(buttons, 8, shared & 0x01);
+    set_button(buttons, 9, shared & 0x02);
+    set_button(buttons, 11, shared & 0x04);
+    set_button(buttons, 10, shared & 0x08);
+    set_button(buttons, 16, shared & 0x10);
+    set_button(buttons, 17, shared & 0x20);
+    set_button(buttons, 13, left & 0x01);
+    set_button(buttons, 12, left & 0x02);
+    set_button(buttons, 15, left & 0x04);
+    set_button(buttons, 14, left & 0x08);
+    set_button(buttons, 4, left & 0x40);
+    set_button(buttons, 6, left & 0x80);
+    state_.buttons = buttons;
+    state_.axes[0] = normalize_switch_stick(
+        read_u12_stick(packet.data() + 5, false));
+    state_.axes[1] = normalize_switch_stick(
+        read_u12_stick(packet.data() + 5, true));
+    state_.axes[2] = normalize_switch_stick(
+        read_u12_stick(packet.data() + 8, false));
+    state_.axes[3] = normalize_switch_stick(
+        read_u12_stick(packet.data() + 8, true));
+    state_.battery_percent = switch_battery_percent(packet[1]);
+
+    const int16_t raw_accel_x = read_i16(packet, 12);
+    const int16_t raw_accel_y = read_i16(packet, 14);
+    const int16_t raw_accel_z = read_i16(packet, 16);
+    const float accel_scale = static_cast<float>(
+        kMetersPerGravity / kSwitchAccelCountsPerGravity);
+    state_.acceleration[0] = -raw_accel_y * accel_scale;
+    state_.acceleration[1] = raw_accel_z * accel_scale;
+    state_.acceleration[2] = -raw_accel_x * accel_scale;
+
+    const int16_t raw_gyro_x = read_i16(packet, 18);
+    const int16_t raw_gyro_y = read_i16(packet, 20);
+    const int16_t raw_gyro_z = read_i16(packet, 22);
+    const float gyro_scale = static_cast<float>(
+        kRadiansPerDegree / kSwitchGyroCountsPerDegreeSecond);
+    state_.angular_velocity[0] = -raw_gyro_y * gyro_scale;
+    state_.angular_velocity[1] = raw_gyro_z * gyro_scale;
+    state_.angular_velocity[2] = -raw_gyro_x * gyro_scale;
+    state = state_;
+    return true;
+  }
+
+ private:
+  DeviceDescription description_{};
+  InputState state_{};
+};
+
+class Switch2ProSourceCodec final : public SourceInputCodec {
+ public:
+  explicit Switch2ProSourceCodec(const ParsedHidDeviceAdd& source) {
+    fill_switch2_description(description_, source);
+    std::fill(std::begin(state_.hats), std::end(state_.hats), uint8_t{8});
+  }
+
+  DeviceProfile profile() const override {
+    return DeviceProfile::switch_2_pro;
+  }
+
+  const DeviceDescription& description() const override {
+    return description_;
+  }
+
+  bool decode_input(const ParsedHidReport& report,
+                    InputState& state) override {
+    if (report.header->report_type !=
+        static_cast<uint8_t>(HidReportType::input) ||
+        report.header->report_id != 0 || report.data.size() < 64) {
+      return false;
+    }
+    const auto packet = report.data.first(64);
+
+    uint64_t buttons = 0;
+    const uint8_t right = packet[5];
+    const uint8_t shared = packet[6];
+    const uint8_t left = packet[7];
+    const uint8_t extra = packet[8];
+    set_button(buttons, 2, right & 0x01);
+    set_button(buttons, 3, right & 0x02);
+    set_button(buttons, 0, right & 0x04);
+    set_button(buttons, 1, right & 0x08);
+    set_button(buttons, 5, right & 0x40);
+    set_button(buttons, 7, right & 0x80);
+    set_button(buttons, 8, shared & 0x01);
+    set_button(buttons, 9, shared & 0x02);
+    set_button(buttons, 11, shared & 0x04);
+    set_button(buttons, 10, shared & 0x08);
+    set_button(buttons, 16, shared & 0x10);
+    set_button(buttons, 17, shared & 0x20);
+    set_button(buttons, 18, shared & 0x40);
+    set_button(buttons, 13, left & 0x01);
+    set_button(buttons, 12, left & 0x02);
+    set_button(buttons, 15, left & 0x04);
+    set_button(buttons, 14, left & 0x08);
+    set_button(buttons, 4, left & 0x40);
+    set_button(buttons, 6, left & 0x80);
+    set_button(buttons, 19, extra & 0x01);
+    set_button(buttons, 20, extra & 0x02);
+    state_.buttons = buttons;
+    state_.hats[0] = dpad_hat(left & 0x02, left & 0x04,
+                              left & 0x01, left & 0x08);
+    state_.axes[0] = normalize_switch_stick(
+        read_u12_stick(packet.data() + 11, false));
+    state_.axes[1] = invert_axis(normalize_switch_stick(
+        read_u12_stick(packet.data() + 11, true)));
+    state_.axes[2] = normalize_switch_stick(
+        read_u12_stick(packet.data() + 14, false));
+    state_.axes[3] = invert_axis(normalize_switch_stick(
+        read_u12_stick(packet.data() + 14, true)));
+    constexpr float accel_scale =
+        static_cast<float>(kMetersPerGravity * 8.0 / INT16_MAX);
+    constexpr float gyro_scale =
+        kSwitch2GyroRadiansPerSecond / INT16_MAX;
+    state_.acceleration[0] = read_i16(packet, 0x31) * accel_scale;
+    state_.acceleration[1] = read_i16(packet, 0x35) * accel_scale;
+    state_.acceleration[2] = read_i16(packet, 0x33) * -accel_scale;
+    state_.angular_velocity[0] = read_i16(packet, 0x37) * gyro_scale;
+    state_.angular_velocity[1] = read_i16(packet, 0x3B) * gyro_scale;
+    state_.angular_velocity[2] = read_i16(packet, 0x39) * -gyro_scale;
+    state = state_;
+    return true;
+  }
+
+ private:
+  DeviceDescription description_{};
   InputState state_{};
 };
 
@@ -440,9 +738,9 @@ class DescriptorBuilder {
     return true;
   }
 
-  std::unique_ptr<HidSourceDecoder> finish() {
-    return std::make_unique<GenericHidSourceDecoder>(description_,
-                                                     std::move(fields_));
+  std::unique_ptr<SourceInputCodec> finish() {
+    return std::make_unique<DescriptorSourceCodec>(description_,
+                                                   std::move(fields_));
   }
 
  private:
@@ -555,13 +853,112 @@ class DescriptorBuilder {
   std::vector<Field> fields_;
 };
 
-}  // namespace
+class SwitchProSourceOutputCodec final : public SourceOutputCodec {
+ public:
+  DeviceProfile profile() const override { return DeviceProfile::switch_pro; }
 
-std::unique_ptr<HidSourceDecoder> HidSourceDecoder::create(
+  bool encode_output(const OutputState& output,
+                     SourceReport& report) override {
+    report.type = HidReportType::output;
+    report.report_id = 0x10;
+    report.data.assign(9, 0);
+    report.data[0] = static_cast<uint8_t>(sequence_++ & 0x0F);
+    encode_switch1_hd_rumble(output, report.data.data() + 1);
+    return true;
+  }
+
+ private:
+  uint8_t sequence_ = 0;
+};
+
+class Switch2ProSourceOutputCodec final : public SourceOutputCodec {
+ public:
+  DeviceProfile profile() const override {
+    return DeviceProfile::switch_2_pro;
+  }
+
+  bool encode_output(const OutputState& output,
+                     SourceReport& report) override {
+    report.type = HidReportType::output;
+    report.report_id = 0;
+    report.data = make_switch2_pro_rumble_report(output, sequence_++);
+    return true;
+  }
+
+ private:
+  uint8_t sequence_ = 0;
+};
+
+bool valid_profile_byte(uint8_t profile) {
+  return profile <= static_cast<uint8_t>(DeviceProfile::xbox);
+}
+
+std::unique_ptr<SourceInputCodec> make_descriptor_source_codec(
     const ParsedHidDeviceAdd& source, std::string& error) {
   DescriptorBuilder builder;
   if (!builder.parse(source, error)) return nullptr;
   return builder.finish();
+}
+
+}  // namespace
+
+std::unique_ptr<SourceInputCodec> make_source_input_codec(
+    const ParsedHidDeviceAdd& source, std::string& error) {
+  if (const auto profile = source_input_profile(*source.header)) {
+    switch (*profile) {
+      case DeviceProfile::switch_pro:
+        return std::make_unique<SwitchProSourceCodec>(source);
+      case DeviceProfile::switch_2_pro:
+        return std::make_unique<Switch2ProSourceCodec>(source);
+      default:
+        break;
+    }
+  }
+  return make_descriptor_source_codec(source, error);
+}
+
+std::optional<DeviceProfile> source_input_profile(
+    const HidDeviceAddHeader& header) {
+  if (header.source_input_profile == kHidSourceInputProfileDescriptor)
+    return std::nullopt;
+  if (header.source_input_profile != kHidSourceInputProfileInfer) {
+    if (valid_profile_byte(header.source_input_profile))
+      return static_cast<DeviceProfile>(header.source_input_profile);
+    return std::nullopt;
+  }
+  if (header.vendor_id == kNintendoVendorId &&
+      header.product_id == kSwitchProProductId)
+    return DeviceProfile::switch_pro;
+  if (header.vendor_id == kNintendoVendorId &&
+      header.product_id == kSwitch2ProProductId)
+    return DeviceProfile::switch_2_pro;
+  return std::nullopt;
+}
+
+std::optional<DeviceProfile> source_output_profile(
+    const HidDeviceAddHeader& header) {
+  if (header.source_output_profile == kHidSourceOutputProfileNone)
+    return std::nullopt;
+  if (header.source_output_profile != kHidSourceOutputProfileDefault) {
+    if (valid_profile_byte(header.source_output_profile))
+      return static_cast<DeviceProfile>(header.source_output_profile);
+    return std::nullopt;
+  }
+  if (const auto input_profile = source_input_profile(header))
+    return input_profile;
+  return std::nullopt;
+}
+
+std::unique_ptr<SourceOutputCodec> make_source_output_codec(
+    DeviceProfile profile) {
+  switch (profile) {
+    case DeviceProfile::switch_pro:
+      return std::make_unique<SwitchProSourceOutputCodec>();
+    case DeviceProfile::switch_2_pro:
+      return std::make_unique<Switch2ProSourceOutputCodec>();
+    default:
+      return nullptr;
+  }
 }
 
 }  // namespace vhid

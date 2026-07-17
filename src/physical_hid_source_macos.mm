@@ -182,6 +182,9 @@ class MacPhysicalHidSource final : public PhysicalHidSource {
   }
 
   bool is_virtual(IOHIDDeviceRef device) const {
+    CFTypeRef bridge_property =
+        IOHIDDeviceGetProperty(device, CFSTR("VirtualHIDBridgeDevice"));
+    if (bridge_property == kCFBooleanTrue) return true;
     CFTypeRef virtual_property =
         IOHIDDeviceGetProperty(device, CFSTR("HIDVirtualDevice"));
     if (virtual_property == kCFBooleanTrue) return true;
@@ -200,6 +203,10 @@ class MacPhysicalHidSource final : public PhysicalHidSource {
 
   void add_device(IOHIDDeviceRef device) {
     if (is_virtual(device) || devices_.contains(device)) return;
+    const uint16_t vendor_id = static_cast<uint16_t>(
+        number_property(device, CFSTR(kIOHIDVendorIDKey)));
+    const uint16_t product_id = static_cast<uint16_t>(
+        number_property(device, CFSTR(kIOHIDProductIDKey)));
     CFArrayRef element_array =
         IOHIDDeviceCopyMatchingElements(device, nullptr,
                                         kIOHIDOptionsTypeNone);
@@ -256,10 +263,8 @@ class MacPhysicalHidSource final : public PhysicalHidSource {
         static_cast<uint8_t>(std::min(hats.size(), kMaxHats));
     description.axis_count =
         static_cast<uint8_t>(std::min(axes.size(), kMaxAxes));
-    description.vendor_id = static_cast<uint16_t>(
-        number_property(device, CFSTR(kIOHIDVendorIDKey)));
-    description.product_id = static_cast<uint16_t>(
-        number_property(device, CFSTR(kIOHIDProductIDKey)));
+    description.vendor_id = vendor_id;
+    description.product_id = product_id;
     description.version_number = static_cast<uint16_t>(
         number_property(device, CFSTR(kIOHIDVersionNumberKey), 1));
     copy_text(description.product, sizeof(description.product),

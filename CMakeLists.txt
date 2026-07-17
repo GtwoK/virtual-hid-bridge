@@ -10,11 +10,12 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(vhid-core
     src/protocol.cpp
-    src/hid_source_decoder.cpp
-    src/source_output_codec.cpp
+    src/haptics.cpp
+    src/source_codec.cpp
     src/mapping.cpp
     src/generic_hid_profile.cpp
-    src/switch_pro_profile.cpp)
+    src/switch_pro_profile.cpp
+    src/switch2_pro_profile.cpp)
 target_include_directories(vhid-core PUBLIC include)
 target_compile_options(vhid-core PRIVATE -Wall -Wextra -Wpedantic)
 
@@ -36,6 +37,15 @@ add_executable(vhid-bridge
 target_include_directories(vhid-bridge PRIVATE include)
 target_compile_options(vhid-bridge PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(vhid-bridge PRIVATE vhid-core vhid-platform)
+
+add_executable(vhid-haptics-probe
+    src/haptics_probe.cpp)
+target_include_directories(vhid-haptics-probe PRIVATE include)
+target_compile_options(vhid-haptics-probe PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(vhid-haptics-probe PRIVATE
+    vhid-core
+    "-framework CoreFoundation"
+    "-framework IOKit")
 
 add_executable(vhid-bridge-ui MACOSX_BUNDLE
     src/ui_app.mm)
@@ -78,6 +88,8 @@ add_executable(vhid-core-tests tests/core_tests.cpp)
 target_link_libraries(vhid-core-tests PRIVATE vhid-core)
 target_compile_options(vhid-core-tests PRIVATE -Wall -Wextra -Wpedantic)
 add_test(NAME vhid-core-tests COMMAND vhid-core-tests)
+
+add_test(NAME vhid-haptics-probe COMMAND vhid-haptics-probe --check)
 
 add_executable(vhid-wire-c-tests tests/wire_c_tests.c)
 target_include_directories(vhid-wire-c-tests PRIVATE include)

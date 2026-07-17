@@ -1,9 +1,11 @@
 #include "vhid/hid_profile.h"
+#include "vhid/haptics.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <optional>
 
 namespace vhid {
 namespace {
@@ -11,6 +13,7 @@ namespace {
 constexpr uint8_t kInputSubcommandReply = 0x21;
 constexpr uint8_t kInputFull = 0x30;
 constexpr uint8_t kInputUsbResponse = 0x81;
+constexpr uint8_t kInitialVibrationAck = 0x70;
 constexpr uint8_t kOutputRumbleSubcommand = 0x01;
 constexpr uint8_t kOutputRumble = 0x10;
 constexpr uint8_t kOutputUsbCommand = 0x80;
@@ -29,6 +32,10 @@ constexpr uint8_t kSubEnableImu = 0x40;
 constexpr uint8_t kSubSetImuSensitivity = 0x41;
 constexpr uint8_t kSubEnableVibration = 0x48;
 constexpr uint8_t kSubGetRegulatedVoltage = 0x50;
+constexpr float kMetersPerGravity = 9.80665f;
+constexpr float kRadiansToDegrees = 57.2957795131f;
+constexpr float kSwitchAccelCountsPerGravity = 4096.0f;
+constexpr float kSwitchGyroCountsPerDegreeSecond = 13371.0f / 936.0f;
 
 constexpr std::array<uint8_t, 203> kSwitchProReportDescriptor = {
     0x05, 0x01, 0x15, 0x00, 0x09, 0x04, 0xA1, 0x01,
@@ -69,19 +76,6 @@ bool button_pressed(const InputState& state, uint8_t index) {
   return index < kMaxButtons && (state.buttons & (uint64_t{1} << index));
 }
 
-uint16_t scaled_u16(uint32_t value, uint32_t minimum, uint32_t maximum) {
-  if (maximum <= minimum || value <= minimum) return 0;
-  if (value >= maximum) return 0xFFFF;
-  return static_cast<uint16_t>(((value - minimum) * 0xFFFFu) /
-                               (maximum - minimum));
-}
-
-uint16_t decode_low_rumble_amplitude(uint32_t value) {
-  if (value >= 0x8000u)
-    return scaled_u16(value, 0x803F, 0x8072);
-  return scaled_u16(value, 0x0040, 0x007F);
-}
-
 uint8_t switch_battery_connection(uint8_t battery_percent) {
   if (battery_percent == 0) return 0x91;
   if (battery_percent >= 80) return 0x81;
@@ -117,26 +111,6 @@ void pack_stick(uint8_t* out, int16_t x, int16_t y) {
 void append_i16(uint8_t* out, int16_t value) {
   out[0] = static_cast<uint8_t>(value);
   out[1] = static_cast<uint8_t>(static_cast<uint16_t>(value) >> 8);
-}
-
-OutputState decode_rumble_data(std::span<const uint8_t> rumble) {
-  OutputState output{};
-  if (rumble.size() < 8) return output;
-  for (size_t motor = 0; motor < 2; ++motor) {
-    const auto sample = rumble.subspan(motor * 4, 4);
-    const uint32_t high_amplitude = sample[1] & 0xFEu;
-    const uint32_t low_amplitude =
-        ((sample[2] & 0x80u) << 8) | sample[3];
-    output.high_frequency =
-        std::max(output.high_frequency,
-                 scaled_u16(high_amplitude, 0x00, 0xC8));
-    output.low_frequency =
-        std::max(output.low_frequency,
-                 decode_low_rumble_amplitude(low_amplitude));
-  }
-  if (output.low_frequency || output.high_frequency)
-    output.duration_ms = 100;
-  return output;
 }
 
 void encode_calibration_pair(uint8_t* out, uint16_t first,
@@ -182,6 +156,11 @@ std::array<uint8_t, 6> make_stable_mac(const std::string& serial) {
 int16_t clamp_i16(long value) {
   return static_cast<int16_t>(std::clamp(value, -32768l, 32767l));
 }
+
+struct RumblePayload {
+  size_t offset;
+  uint8_t sequence;
+};
 
 class SwitchProProfile final : public HidProfile {
  public:
@@ -245,18 +224,17 @@ class SwitchProProfile final : public HidProfile {
 
     pack_stick(&report[6], state.axes[0], state.axes[1]);
     pack_stick(&report[9], state.axes[2], state.axes[3]);
-    report[12] = 0x09;
+    report[12] = vibration_ack_;
     encode_motion(state, report);
     return report;
   }
 
   bool decode_output(std::span<const uint8_t> report,
                      OutputState& output) const override {
-    const bool includes_report_id =
-        !report.empty() && (report[0] == 0x01 || report[0] == 0x10);
-    const size_t rumble_offset = includes_report_id ? 2 : 1;
-    if (report.size() < rumble_offset + 8) return false;
-    output = decode_rumble_data(report.subspan(rumble_offset, 8));
+    const auto payload = rumble_payload(report);
+    if (!payload || report.size() < payload->offset + 8) return false;
+    note_vibration_sequence(payload->sequence);
+    decode_switch1_hd_rumble(report.subspan(payload->offset, 8), output);
     return true;
   }
 
@@ -273,8 +251,10 @@ class SwitchProProfile final : public HidProfile {
       case kOutputUsbCommand:
         return handle_usb_command(payload, response);
       case kOutputRumbleSubcommand:
+        note_vibration_packet(payload);
         return handle_subcommand(payload, response);
       case kOutputRumble:
+        note_vibration_packet(payload);
         return true;
       default:
         return false;
@@ -322,27 +302,59 @@ class SwitchProProfile final : public HidProfile {
     return true;
   }
 
+  static std::optional<RumblePayload> rumble_payload(
+      std::span<const uint8_t> packet) {
+    if (packet.empty()) return std::nullopt;
+    switch (packet[0]) {
+      case kOutputRumbleSubcommand:
+      case kOutputRumble:
+        if (packet.size() < 2) return std::nullopt;
+        return RumblePayload{2, static_cast<uint8_t>(packet[1] & 0x0F)};
+      case kOutputUsbCommand:
+      case 0x82:
+        return std::nullopt;
+      default:
+        if (packet[0] > 0x0F) return std::nullopt;
+        return RumblePayload{1, static_cast<uint8_t>(packet[0] & 0x0F)};
+    }
+  }
+
+  void note_vibration_packet(std::span<const uint8_t> payload) const {
+    if (payload.empty()) return;
+    note_vibration_sequence(payload[0]);
+  }
+
+  void note_vibration_sequence(uint8_t sequence) const {
+    vibration_ack_ = static_cast<uint8_t>((sequence & 0x0F) << 4);
+  }
+
   static void encode_motion(const InputState& state,
                             std::vector<uint8_t>& report) {
     const bool has_motion =
         state.acceleration[0] != 0.0f || state.acceleration[1] != 0.0f ||
         state.acceleration[2] != 0.0f || state.angular_velocity[0] != 0.0f ||
         state.angular_velocity[1] != 0.0f || state.angular_velocity[2] != 0.0f;
-    const float accel_z =
-        has_motion ? state.acceleration[2] : 9.80665f;
+    const float accel_x = has_motion ? state.acceleration[0] : 0.0f;
+    const float accel_y = has_motion ? state.acceleration[1] : kMetersPerGravity;
+    const float accel_z = has_motion ? state.acceleration[2] : 0.0f;
     const int16_t accel[] = {
-        clamp_i16(std::lround(state.acceleration[0] / 9.80665f * 256.0f)),
-        clamp_i16(std::lround(state.acceleration[1] / 9.80665f * 256.0f)),
-        clamp_i16(std::lround(accel_z / 9.80665f * 256.0f)),
+        clamp_i16(std::lround(-accel_z / kMetersPerGravity *
+                              kSwitchAccelCountsPerGravity)),
+        clamp_i16(std::lround(-accel_x / kMetersPerGravity *
+                              kSwitchAccelCountsPerGravity)),
+        clamp_i16(std::lround(accel_y / kMetersPerGravity *
+                              kSwitchAccelCountsPerGravity)),
     };
-    constexpr float kRadiansToDegrees = 57.2957795131f;
     const int16_t gyro[] = {
-        clamp_i16(std::lround(state.angular_velocity[0] *
-                              kRadiansToDegrees * 16.0f)),
+        clamp_i16(std::lround(-state.angular_velocity[2] *
+                              kRadiansToDegrees *
+                              kSwitchGyroCountsPerDegreeSecond)),
+        clamp_i16(std::lround(-state.angular_velocity[0] *
+                              kRadiansToDegrees *
+                              kSwitchGyroCountsPerDegreeSecond)),
         clamp_i16(std::lround(state.angular_velocity[1] *
-                              kRadiansToDegrees * 16.0f)),
-        clamp_i16(std::lround(state.angular_velocity[2] *
-                              kRadiansToDegrees * 16.0f)),
+                              kRadiansToDegrees *
+                              kSwitchGyroCountsPerDegreeSecond)),
     };
     for (size_t sample = 0; sample < 3; ++sample) {
       const size_t base = 13 + sample * 12;
@@ -496,6 +508,7 @@ class SwitchProProfile final : public HidProfile {
   uint8_t player_leds_ = 0;
   bool imu_enabled_ = false;
   bool vibration_enabled_ = false;
+  mutable uint8_t vibration_ack_ = kInitialVibrationAck;
   mutable uint8_t timer_ = 0;
 };
 

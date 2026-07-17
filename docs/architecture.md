@@ -48,11 +48,17 @@ the controller ID, report metadata, sequencing/timestamp fields and report
 bytes. Complete input reports use latest-value-wins semantics, while lifecycle
 and output remain ordered.
 
+Source input is decoded by a source input codec. `source_input_profile` may
+force generic descriptor-backed HID input, request VID/PID inference, or name a
+known native controller profile. Unknown or unimplemented input profiles fall
+back to generic descriptor-backed HID so a sender can remain useful with just a
+standard report descriptor.
+
 Input descriptors do not define a universal haptics format. Source output uses
-a source output codec selected from the source identity or the explicit
-`source_output_profile` field in `hid_device_add`. When that source output
-profile matches the selected virtual output profile, output reports can be
-forwarded as native bytes. Otherwise the bridge needs a real source-native
+a source output codec selected from `source_output_profile`, or from the source
+input profile when the output field is left at its default. When that source
+output profile matches the selected virtual output profile, output reports can
+be forwarded as native bytes. Otherwise the bridge needs a real source-native
 encoder for that controller family.
 
 The optional semantic device/state messages support software that generates
@@ -122,8 +128,8 @@ strategy.
 
 Raw HID transport does not imply clean passthrough. Normal operation is:
 
-1. decode the source controller's reports into semantic controls using the
-   announced HID report descriptor;
+1. decode the source controller's reports into semantic controls using either
+   the announced HID report descriptor or a native source input codec;
 2. apply user mappings, calibration, inversion and curves;
 3. encode a newly selected virtual-controller profile.
 
@@ -140,6 +146,27 @@ automatically become standardized SDL or Apple GameController motion.
 A recognized profile is an encoder, not a label. Each implementation must
 reproduce the descriptor, identity, input reports, feature reports and output
 protocol expected for that controller.
+
+## Haptics translation
+
+Haptics use the same edge-codec model as input. The bridge should not grow
+pairwise translators between every controller family. Each virtual output
+profile decodes host output reports into internal haptic motor state, and each
+source output profile encodes that state into its native output reports.
+
+The internal state preserves per-motor low/high frequency, amplitude, encoded
+fields when known, duration and source-native samples when a decoder can keep
+them losslessly. Native byte forwarding remains the preferred path when the
+selected virtual output profile and source output profile match. Cross-profile
+translation is explicit codec work: HD formats remap frequency/amplitude through
+their native tables, while simpler ERM/on-off devices downmix by motor, band
+and energy. Any dropped dimensions should be visible in trace output.
+
+Switch 2 Pro currently follows the USB report-format-5 packet layout also used
+by SDL: 64-byte reports with no HID report ID, the known button/stick offsets,
+the known IMU offsets and the USB output `0x02` haptics envelope. That is a
+different native contract from the public HID `0x09` input layout, and it does
+not mean the bridge mirrors SDL's simplified rumble policy.
 
 ## Mapping UI
 

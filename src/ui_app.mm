@@ -29,11 +29,13 @@
 @property(nonatomic, strong) NSButton* startStopButton;
 @property(nonatomic, strong) NSButton* noPhysicalCheck;
 @property(nonatomic, strong) NSButton* dryRunCheck;
+@property(nonatomic, strong) NSButton* traceRumbleCheck;
 @property(nonatomic, strong) NSTextView* logView;
 @property(nonatomic, strong) NSTableView* tableView;
 @property(nonatomic, strong) NSMutableArray<DeviceRow*>* devices;
 @property(nonatomic, strong) NSMutableString* lineBuffer;
 @property(nonatomic, strong) NSTask* task;
+@property(nonatomic, strong) NSPipe* inputPipe;
 @end
 
 @implementation AppDelegate
@@ -71,6 +73,22 @@
                                              keyEquivalent:@"q"];
   [appMenu addItem:quitItem];
   [appItem setSubmenu:appMenu];
+
+  NSMenuItem* editItem = [[NSMenuItem alloc] initWithTitle:@""
+                                                    action:nil
+                                             keyEquivalent:@""];
+  [mainMenu addItem:editItem];
+  NSMenu* editMenu = [[NSMenu alloc] initWithTitle:@"Edit"];
+  NSMenuItem* copyItem = [[NSMenuItem alloc] initWithTitle:@"Copy"
+                                                    action:@selector(copy:)
+                                             keyEquivalent:@"c"];
+  [editMenu addItem:copyItem];
+  NSMenuItem* selectAllItem =
+      [[NSMenuItem alloc] initWithTitle:@"Select All"
+                                 action:@selector(selectAll:)
+                          keyEquivalent:@"a"];
+  [editMenu addItem:selectAllItem];
+  [editItem setSubmenu:editMenu];
   [NSApp setMainMenu:mainMenu];
 }
 
@@ -162,6 +180,12 @@
   self.dryRunCheck.buttonType = NSButtonTypeSwitch;
   [content addSubview:self.dryRunCheck];
 
+  self.traceRumbleCheck =
+      [[NSButton alloc] initWithFrame:NSMakeRect(855, y - 2, 110, 24)];
+  self.traceRumbleCheck.title = @"Rumble log";
+  self.traceRumbleCheck.buttonType = NSButtonTypeSwitch;
+  [content addSubview:self.traceRumbleCheck];
+
   y -= 40;
   NSTextField* identityTitle =
       [self label:@"Virtual device identity overrides (blank = source/default)"
@@ -176,8 +200,10 @@
                                  pullsDown:NO];
   [self.profilePopup addItemsWithTitles:@[
     @"Source/default", @"Generic HID", @"Standard Gamepad",
-    @"Switch 1 Pro Controller"
+    @"Switch 1 Pro Controller", @"Switch 2 Pro Controller"
   ]];
+  self.profilePopup.target = self;
+  self.profilePopup.action = @selector(outputProfileChanged:);
   [content addSubview:self.profilePopup];
 
   y -= 30;
@@ -258,6 +284,7 @@
   logScroll.hasVerticalScroller = YES;
   self.logView = [[NSTextView alloc] initWithFrame:logScroll.bounds];
   self.logView.editable = NO;
+  self.logView.selectable = YES;
   self.logView.font = [NSFont monospacedSystemFontOfSize:12
                                                   weight:NSFontWeightRegular];
   logScroll.documentView = self.logView;
@@ -316,6 +343,35 @@
   [arguments addObject:value];
 }
 
+- (NSString*)profileCommandValue {
+  NSString* profile = self.profilePopup.titleOfSelectedItem;
+  if ([profile isEqualToString:@"Generic HID"]) return @"generic";
+  if ([profile isEqualToString:@"Standard Gamepad"]) return @"standard-gamepad";
+  if ([profile isEqualToString:@"Switch 1 Pro Controller"]) return @"switch-pro";
+  if ([profile isEqualToString:@"Switch 2 Pro Controller"]) return @"switch2-pro";
+  return @"source";
+}
+
+- (void)sendBridgeCommand:(NSString*)command {
+  if (!self.task || !self.task.isRunning || !self.inputPipe) return;
+  NSString* line = [command stringByAppendingString:@"\n"];
+  NSData* data = [line dataUsingEncoding:NSUTF8StringEncoding];
+  if (!data.length) return;
+  @try {
+    [self.inputPipe.fileHandleForWriting writeData:data];
+  } @catch (NSException* exception) {
+    [self appendLine:[NSString stringWithFormat:@"warning: failed to send command: %@",
+                                                exception.reason]];
+  }
+}
+
+- (void)outputProfileChanged:(id)sender {
+  (void)sender;
+  if (!self.task || !self.task.isRunning) return;
+  [self sendBridgeCommand:
+      [NSString stringWithFormat:@"profile %@", [self profileCommandValue]]];
+}
+
 - (void)startBridge {
   NSString* executable = self.executableField.stringValue;
   if (![NSFileManager.defaultManager isExecutableFileAtPath:executable]) {
@@ -343,15 +399,12 @@
   if (self.dryRunCheck.state == NSControlStateValueOn) {
     [arguments addObject:@"--dry-run"];
   }
-  NSString* profile = self.profilePopup.titleOfSelectedItem;
-  if ([profile isEqualToString:@"Generic HID"]) {
-    [arguments addObjectsFromArray:@[ @"--output-profile", @"generic" ]];
-  } else if ([profile isEqualToString:@"Standard Gamepad"]) {
-    [arguments addObjectsFromArray:@[
-      @"--output-profile", @"standard-gamepad"
-    ]];
-  } else if ([profile isEqualToString:@"Switch 1 Pro Controller"]) {
-    [arguments addObjectsFromArray:@[ @"--output-profile", @"switch-pro" ]];
+  if (self.traceRumbleCheck.state == NSControlStateValueOn) {
+    [arguments addObject:@"--trace-rumble"];
+  }
+  NSString* profileCommand = [self profileCommandValue];
+  if (![profileCommand isEqualToString:@"source"]) {
+    [arguments addObjectsFromArray:@[ @"--output-profile", profileCommand ]];
   }
   [self addArgument:@"--override-vendor-id"
           fromField:self.vendorIdField
@@ -389,8 +442,10 @@
   self.task.executableURL = [NSURL fileURLWithPath:executable];
   self.task.arguments = arguments;
   NSPipe* pipe = [NSPipe pipe];
+  self.inputPipe = [NSPipe pipe];
   self.task.standardOutput = pipe;
   self.task.standardError = pipe;
+  self.task.standardInput = self.inputPipe;
 
   __weak AppDelegate* weakSelf = self;
   pipe.fileHandleForReading.readabilityHandler = ^(NSFileHandle* handle) {
@@ -415,6 +470,7 @@
     [self appendLine:[NSString stringWithFormat:@"error: failed to launch: %@",
                                                 error.localizedDescription]];
     self.task = nil;
+    self.inputPipe = nil;
     return;
   }
 
@@ -437,6 +493,7 @@
   self.statusLabel.stringValue = @"Stopped";
   self.startStopButton.title = @"Start";
   self.task = nil;
+  self.inputPipe = nil;
   [self appendLine:@"bridge process exited"];
 }
 

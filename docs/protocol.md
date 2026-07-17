@@ -70,6 +70,8 @@ distinguish them inside that session.
 - vendor ID, product ID and version
 - transport hint
 - flags
+- source input profile hint
+- optional source output profile hint
 - product/manufacturer/serial strings
 - complete HID report descriptor
 
@@ -77,11 +79,18 @@ The sender should keep `device_id` stable for the same physical controller when
 possible. The serial string is the best place to carry a stable per-controller
 identity for profile recall.
 
-The final byte of `HidDeviceAddHeader` is `source_output_profile`. A value of
-`0` asks the bridge to infer the source output protocol from identity. A value
-of `0xff` disables source output. Other values use the `DeviceProfile` numeric
-IDs, so a generic input descriptor can explicitly ask to receive Switch Pro
-output reports by setting this field to `2`.
+`source_input_profile` selects how input reports are decoded. `0` asks the
+bridge to infer a known native input codec from VID/PID. `0xff` forces generic
+descriptor-backed HID input. Other non-zero values use the `DeviceProfile`
+numeric IDs. If the requested or inferred input codec is unknown or not
+implemented, the bridge falls back to generic descriptor-backed HID input.
+
+`source_output_profile` selects the optional source-side feedback protocol.
+`0` defaults to the source input profile when that profile is known natively.
+`0xff` disables source output. Other non-zero values use the `DeviceProfile`
+numeric IDs, so a generic input descriptor can explicitly ask to receive Switch
+Pro output reports by setting this field to `2`, or Switch 2 Pro output reports
+by setting it to `3`.
 
 ## HID reports
 
@@ -96,16 +105,26 @@ report-ID prefix. For report-ID-less devices, the report ID is `0`.
 Input reports are latest-value-wins. Lifecycle and output messages should remain
 ordered.
 
-Motion sources should use the HID Sensors page (`0x20`) for acceleration and
-angular velocity fields. The bridge accepts the standard acceleration X/Y/Z
-and angular velocity X/Y/Z usages, applies the HID unit exponent, treats the
-default units as Gs and degrees/sec, then stores m/s² and rad/sec internally.
+Descriptor-backed generic motion sources should use the HID Sensors page
+(`0x20`) for acceleration and angular velocity fields. The bridge accepts the
+standard acceleration X/Y/Z and angular velocity X/Y/Z usages, applies the HID
+unit exponent, treats the default units as Gs and degrees/sec, then stores
+m/s² and rad/sec internally using SDL sensor axes: for a controller held in
+front, +X points right, +Y toward the top edge, and +Z closer to the player.
+Native input codecs own their whole source report contract, including buttons,
+hats, sticks, battery and motion.
+
+Switch 2 Pro native input uses the USB packet layout also used by SDL: report
+ID `0`, a 64-byte payload, button bytes at offsets 5..8, 12-bit sticks at
+offsets 11 and 14, and IMU samples at offsets `0x31..0x3c`. This is not the
+public HID `0x09` report layout used by Linux/BlueZ experiments.
 
 Source output reports are source-native. If the selected virtual output profile
 and source output profile match, the bridge forwards the profile-native output
-report bytes to the source. Cross-profile haptics require a source output codec
-for the announced source profile; the bridge does not assign rumble meaning to
-arbitrary vendor-defined HID output reports.
+report bytes to the source. Cross-profile haptics are decoded from the virtual
+output profile into internal motor state, then encoded by the source output
+codec for the announced source profile. The bridge does not assign rumble
+meaning to arbitrary vendor-defined HID output reports.
 
 ## Transparent mode
 

@@ -22,7 +22,9 @@ constexpr size_t kMaxDatagramSize = 1400;
 constexpr size_t kMaxButtons = 64;
 constexpr size_t kMaxHats = 4;
 constexpr size_t kMaxAxes = 16;
-constexpr uint8_t kHidSourceOutputProfileInfer = 0;
+constexpr uint8_t kHidSourceInputProfileInfer = 0;
+constexpr uint8_t kHidSourceOutputProfileDefault = 0;
+constexpr uint8_t kHidSourceInputProfileDescriptor = 0xff;
 constexpr uint8_t kHidSourceOutputProfileNone = 0xff;
 
 enum class MessageType : uint8_t {
@@ -125,7 +127,9 @@ struct HidDeviceAddHeader {
   uint8_t product_size;
   uint8_t manufacturer_size;
   uint8_t serial_size;
+  uint8_t source_input_profile;
   uint8_t source_output_profile;
+  uint8_t reserved;
 };
 
 // Report bytes never contain the report ID prefix. The ID is carried here so
@@ -168,7 +172,9 @@ struct DeviceDescription {
 //
 // Hat values are HID directions 0..7 clockwise from north; 8 is neutral.
 // Axis values are normalized signed 16-bit. Unipolar axes use 0..32767.
-// Motion is in SI units: acceleration m/s^2, angular velocity rad/s, and
+// Motion uses SDL sensor axes and SI units: for a controller held in front,
+// +X points right, +Y toward the top edge, and +Z closer to the player.
+// Acceleration is m/s^2, angular velocity is rad/s, and orientation is
 // quaternion x/y/z/w.
 struct InputState {
   uint64_t buttons;
@@ -181,6 +187,25 @@ struct InputState {
   uint8_t reserved[3];
 };
 
+struct HapticBandState {
+  uint16_t frequency_hz;
+  uint16_t amplitude;
+  uint16_t encoded_frequency;
+  uint16_t encoded_amplitude;
+};
+
+struct HapticMotorState {
+  HapticBandState low;
+  HapticBandState high;
+  uint8_t switch1_hd[4];
+};
+
+enum OutputHapticFlags : uint8_t {
+  kOutputHapticMotorLeft = 1u << 0,
+  kOutputHapticMotorRight = 1u << 1,
+  kOutputHapticSwitch1HdPacket = 1u << 2,
+};
+
 struct OutputState {
   uint16_t low_frequency;
   uint16_t high_frequency;
@@ -190,12 +215,16 @@ struct OutputState {
   uint8_t green;
   uint8_t blue;
   uint8_t reserved;
+  uint8_t haptic_flags;
+  uint8_t motor_count;
+  uint8_t reserved2[2];
+  HapticMotorState motors[2];
 };
 #pragma pack(pop)
 
 static_assert(sizeof(MessageHeader) == 28);
 static_assert(sizeof(SessionPayload) == 52);
-static_assert(sizeof(HidDeviceAddHeader) == 14);
+static_assert(sizeof(HidDeviceAddHeader) == 16);
 static_assert(sizeof(HidReportHeader) == 4);
 static_assert(sizeof(AxisDescriptor) == 16);
 static_assert(sizeof(InputState) == 88);

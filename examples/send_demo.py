@@ -23,9 +23,12 @@ HID_REPORT_INPUT = 0
 HID_REPORT_OUTPUT = 1
 TRANSPORT_NETWORK = 4
 ALLOW_TRANSPARENT_OUTPUT = 1
-SOURCE_OUTPUT_INFER = 0
+SOURCE_INPUT_INFER = 0
+SOURCE_OUTPUT_DEFAULT = 0
+SOURCE_INPUT_GENERIC_HID = 0xFF
 SOURCE_OUTPUT_NONE = 0xFF
 SOURCE_OUTPUT_SWITCH_PRO = 2
+SOURCE_OUTPUT_SWITCH2_PRO = 3
 DEVICE_ID = 1
 KEEPALIVE_US = 5_000_000
 TIMEOUT_US = 15_000_000
@@ -120,13 +123,14 @@ class HidUdpSender:
         manufacturer: str,
         serial: str,
         allow_transparent_output: bool = False,
-        source_output_profile: int = SOURCE_OUTPUT_INFER,
+        source_input_profile: int = SOURCE_INPUT_GENERIC_HID,
+        source_output_profile: int = SOURCE_OUTPUT_DEFAULT,
     ) -> None:
         product_bytes = product.encode("utf-8")
         manufacturer_bytes = manufacturer.encode("utf-8")
         serial_bytes = serial.encode("utf-8")
         payload = struct.pack(
-            "<HHHBBHBBBB",
+            "<HHHBBHBBBBBB",
             vendor_id,
             product_id,
             version,
@@ -136,7 +140,9 @@ class HidUdpSender:
             len(product_bytes),
             len(manufacturer_bytes),
             len(serial_bytes),
+            source_input_profile,
             source_output_profile,
+            0,
         )
         self._send(
             HID_DEVICE_ADD,
@@ -261,9 +267,14 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=48660)
     parser.add_argument(
+        "--source-input-profile",
+        choices=("infer", "generic-hid"),
+        default="generic-hid",
+    )
+    parser.add_argument(
         "--source-output-profile",
-        choices=("infer", "none", "switch-pro"),
-        default="infer",
+        choices=("default", "infer", "none", "switch-pro", "switch2-pro"),
+        default="default",
     )
     parser.add_argument(
         "--duration", type=float, default=0.0,
@@ -272,10 +283,16 @@ def main() -> None:
     args = parser.parse_args()
     sender = HidUdpSender(args.host, args.port, DEVICE_ID)
     sender.open_session()
+    source_input_profile = {
+        "infer": SOURCE_INPUT_INFER,
+        "generic-hid": SOURCE_INPUT_GENERIC_HID,
+    }[args.source_input_profile]
     source_output_profile = {
-        "infer": SOURCE_OUTPUT_INFER,
+        "default": SOURCE_OUTPUT_DEFAULT,
+        "infer": SOURCE_OUTPUT_DEFAULT,
         "none": SOURCE_OUTPUT_NONE,
         "switch-pro": SOURCE_OUTPUT_SWITCH_PRO,
+        "switch2-pro": SOURCE_OUTPUT_SWITCH2_PRO,
     }[args.source_output_profile]
     sender.add_controller(
         descriptor=REPORT_DESCRIPTOR,
@@ -285,6 +302,7 @@ def main() -> None:
         product="Raw HID Demo Controller",
         manufacturer="Virtual HID Bridge",
         serial="demo-1",
+        source_input_profile=source_input_profile,
         source_output_profile=source_output_profile,
     )
     try:

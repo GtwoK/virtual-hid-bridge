@@ -11,6 +11,8 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -24,11 +26,10 @@
 #include <unistd.h>
 
 #include "vhid/hid_profile.h"
-#include "vhid/hid_source_decoder.h"
 #include "vhid/mapping.h"
 #include "vhid/physical_hid_source.h"
 #include "vhid/protocol.h"
-#include "vhid/source_output_codec.h"
+#include "vhid/source_codec.h"
 
 namespace {
 
@@ -163,10 +164,12 @@ struct IdentityOverrides {
 
 struct Controller {
   vhid::ControllerMapping mapping = vhid::ControllerMapping::identity();
+  vhid::DeviceDescription source_description{};
   std::shared_ptr<vhid::HidProfile> profile;
-  std::unique_ptr<vhid::HidSourceDecoder> source_decoder;
+  std::unique_ptr<vhid::SourceInputCodec> source_input_codec;
   std::unique_ptr<vhid::SourceOutputCodec> source_output_codec;
   std::unique_ptr<vhid::VirtualDevice> device;
+  Route route;
   vhid::DeviceProfile output_profile = vhid::DeviceProfile::generic;
   uint32_t last_sequence = 0;
   bool have_sequence = false;
@@ -175,8 +178,10 @@ struct Controller {
 
 class Runtime {
  public:
-  Runtime(bool dry_run, IdentityOverrides overrides)
-      : dry_run_(dry_run), overrides_(std::move(overrides)) {}
+  Runtime(bool dry_run, bool trace_rumble, IdentityOverrides overrides)
+      : dry_run_(dry_run),
+        trace_rumble_(trace_rumble),
+        overrides_(std::move(overrides)) {}
 
   bool add_semantic(uint32_t id,
                     const vhid::DeviceDescription& description,
@@ -195,17 +200,12 @@ class Runtime {
     vhid::HidDeviceProperties properties = profile->properties();
     overrides_.apply(properties);
     Controller controller;
+    controller.source_description = description;
     controller.profile = profile;
+    controller.route = route;
     controller.output_profile =
         static_cast<vhid::DeviceProfile>(
             effective_description.requested_profile);
-    if (const auto source_output_profile =
-            vhid::infer_source_output_profile(
-                effective_description.vendor_id,
-                effective_description.product_id)) {
-      controller.source_output_codec =
-          vhid::make_source_output_codec(*source_output_profile);
-    }
     if (!dry_run_) {
       std::string error;
       const Route output_route = route;
@@ -233,8 +233,9 @@ class Runtime {
   bool add_hid_source(uint32_t id, const vhid::ParsedHidDeviceAdd& source,
                       const Route& route) {
     std::string decode_error;
-    auto decoder = vhid::HidSourceDecoder::create(source, decode_error);
-    if (!decoder) {
+    auto source_input_codec =
+        vhid::make_source_input_codec(source, decode_error);
+    if (!source_input_codec) {
       if (!overrides_.profile_set &&
           (source.header->flags & vhid::kHidAllowTransparentOutput)) {
         std::cerr << "device " << id << ": HID source descriptor cannot be "
@@ -251,7 +252,8 @@ class Runtime {
     }
 
     std::lock_guard lock(mutex_);
-    vhid::DeviceDescription effective_description = decoder->description();
+    vhid::DeviceDescription effective_description =
+        source_input_codec->description();
     overrides_.apply(effective_description);
     auto profile_unique = vhid::make_profile(effective_description);
     if (!profile_unique) {
@@ -264,20 +266,22 @@ class Runtime {
     vhid::HidDeviceProperties properties = profile->properties();
     overrides_.apply(properties);
     Controller controller;
+    controller.source_description = source_input_codec->description();
     controller.profile = profile;
-    controller.source_decoder = std::move(decoder);
+    controller.source_input_codec = std::move(source_input_codec);
+    controller.route = route;
     controller.output_profile =
         static_cast<vhid::DeviceProfile>(
             effective_description.requested_profile);
     if (const auto source_output_profile =
-            vhid::announced_source_output_profile(*source.header)) {
+            vhid::source_output_profile(*source.header)) {
       controller.source_output_codec =
           vhid::make_source_output_codec(*source_output_profile);
       if (!controller.source_output_codec) {
         std::cerr << "device " << id << ": source output profile "
                   << profile_name(static_cast<uint8_t>(
                          *source_output_profile))
-                  << " is not implemented; source rumble disabled\n";
+                  << " is not implemented; source haptics disabled\n";
       }
     }
     if (!dry_run_) {
@@ -346,6 +350,7 @@ class Runtime {
                                         source.descriptor.end());
     Controller controller;
     controller.raw_hid = true;
+    controller.route = route;
     if (!dry_run_) {
       std::string error;
       controller.device = vhid::VirtualDevice::create_raw(
@@ -365,8 +370,43 @@ class Runtime {
 
   void remove(uint32_t id) {
     std::lock_guard lock(mutex_);
-    if (controllers_.erase(id))
-      std::cout << "device " << id << " removed\n";
+    auto found = controllers_.find(id);
+    if (found == controllers_.end()) return;
+    Controller& controller = found->second;
+    if (controller.device && controller.profile) {
+      vhid::InputState neutral{};
+      std::fill(std::begin(neutral.hats), std::end(neutral.hats), uint8_t{8});
+      controller.device->send(controller.profile->encode(neutral));
+    }
+    controllers_.erase(found);
+    std::cout << "device " << id << " removed\n";
+  }
+
+  void set_output_profile(std::optional<vhid::DeviceProfile> profile) {
+    std::lock_guard lock(mutex_);
+    overrides_.profile_set = profile.has_value();
+    if (profile) overrides_.profile = *profile;
+    size_t changed = 0;
+    size_t skipped = 0;
+    bool failed = false;
+    for (auto& [id, controller] : controllers_) {
+      if (controller.raw_hid) {
+        ++skipped;
+        continue;
+      }
+      if (rebuild_controller(id, controller)) {
+        ++changed;
+      } else {
+        failed = true;
+      }
+    }
+    std::cout << "output profile set to "
+              << (profile ? profile_name(*profile) : "source/default")
+              << " (" << changed << " device";
+    if (changed != 1) std::cout << 's';
+    if (skipped) std::cout << ", " << skipped << " transparent skipped";
+    if (failed) std::cout << ", some failed";
+    std::cout << ")\n";
   }
 
   void input(uint32_t id, uint32_t sequence,
@@ -398,14 +438,14 @@ class Runtime {
       return;
     }
     Controller& controller = found->second;
-    if (!controller.source_decoder && !controller.raw_hid) return;
+    if (!controller.source_input_codec && !controller.raw_hid) return;
     if (controller.have_sequence &&
         static_cast<int32_t>(sequence - controller.last_sequence) <= 0) {
       return;
     }
-    if (controller.source_decoder) {
+    if (controller.source_input_codec) {
       vhid::InputState state{};
-      if (!controller.source_decoder->decode_input(source, state)) return;
+      if (!controller.source_input_codec->decode_input(source, state)) return;
       controller.have_sequence = true;
       controller.last_sequence = sequence;
       const auto report =
@@ -428,6 +468,67 @@ class Runtime {
   }
 
  private:
+  void trace_decoded_output(uint32_t id, const char* stage,
+                            const vhid::OutputState& output) const {
+    if (!trace_rumble_) return;
+    std::cout << "rumble " << stage << " device " << id
+              << ": low=" << output.low_frequency
+              << " high=" << output.high_frequency
+              << " duration_ms=" << output.duration_ms
+              << " leds=0x" << std::hex << unsigned(output.player_leds)
+              << std::dec;
+    if (output.haptic_flags) {
+      for (size_t motor = 0; motor < 2; ++motor) {
+        const uint8_t flag = motor == 0 ? vhid::kOutputHapticMotorLeft
+                                        : vhid::kOutputHapticMotorRight;
+        if (!(output.haptic_flags & flag)) continue;
+        const auto& haptic = output.motors[motor];
+        std::cout << " m" << motor
+                  << "(lo=" << haptic.low.amplitude
+                  << "@" << haptic.low.frequency_hz
+                  << "/0x" << std::hex
+                  << unsigned(haptic.low.encoded_frequency)
+                  << ":0x" << unsigned(haptic.low.encoded_amplitude)
+                  << std::dec
+                  << " hi=" << haptic.high.amplitude
+                  << "@" << haptic.high.frequency_hz
+                  << "/0x" << std::hex
+                  << unsigned(haptic.high.encoded_frequency)
+                  << ":0x" << unsigned(haptic.high.encoded_amplitude);
+        if (output.haptic_flags & vhid::kOutputHapticSwitch1HdPacket) {
+          std::cout << " s1=";
+          for (size_t i = 0; i < 4; ++i) {
+            if (i) std::cout << ' ';
+            std::cout << unsigned(haptic.switch1_hd[i]);
+          }
+        }
+        std::cout << std::dec << ")";
+      }
+    }
+    std::cout << '\n';
+  }
+
+  void trace_report(uint32_t id, const char* stage,
+                    vhid::HidReportType type, uint8_t report_id,
+                    std::span<const uint8_t> data) const {
+    if (!trace_rumble_) return;
+    std::cout << "rumble " << stage << " device " << id
+              << ": type=" << unsigned(static_cast<uint8_t>(type))
+              << " report_id=0x" << std::hex << unsigned(report_id)
+              << std::dec << " bytes=" << data.size();
+    const size_t preview = std::min<size_t>(data.size(), 16);
+    if (preview) {
+      std::cout << " data=";
+      for (size_t i = 0; i < preview; ++i) {
+        if (i) std::cout << ' ';
+        std::cout << std::hex << unsigned(data[i]);
+      }
+      std::cout << std::dec;
+    }
+    if (data.size() > preview) std::cout << " ...";
+    std::cout << '\n';
+  }
+
   void send_source_report(const Route& route, vhid::HidReportType type,
                           uint8_t report_id,
                           std::span<const uint8_t> data) {
@@ -445,10 +546,13 @@ class Runtime {
     return [this, id, route](vhid::HidReportType type, uint8_t report_id,
                             std::span<const uint8_t> data) {
       std::vector<uint8_t> response;
-      vhid::SourceOutputReport source_report;
+      vhid::SourceReport source_report;
       bool have_source_report = false;
       bool allow_raw_report_forward = false;
       bool consumed = false;
+      bool decoded_output_failed = false;
+      uint8_t decoded_output_failed_report_id = 0;
+      size_t decoded_output_failed_size = 0;
       {
         std::lock_guard lock(mutex_);
         auto found = controllers_.find(id);
@@ -463,7 +567,10 @@ class Runtime {
               source_report.report_id = report_id;
               source_report.data.assign(data.begin(), data.end());
               have_source_report = true;
+              trace_report(id, "native-forward", source_report.type,
+                           source_report.report_id, source_report.data);
             } else if (type == vhid::HidReportType::output) {
+              trace_report(id, "host-output", type, report_id, data);
               vhid::OutputState output{};
               bool decoded_output =
                   found->second.profile->decode_output(data, output);
@@ -475,8 +582,21 @@ class Runtime {
                 decoded_output =
                     found->second.profile->decode_output(packet, output);
               }
-              have_source_report =
-                  decoded_output && codec.encode(output, source_report);
+              if (decoded_output) {
+                trace_decoded_output(id, "decoded-host", output);
+                have_source_report = codec.encode_output(output, source_report);
+                if (have_source_report) {
+                  trace_report(id, "source-encoded", source_report.type,
+                               source_report.report_id, source_report.data);
+                } else if (trace_rumble_) {
+                  std::cout << "rumble dropped device " << id
+                            << ": source codec could not encode output\n";
+                }
+              } else {
+                decoded_output_failed = true;
+                decoded_output_failed_report_id = report_id;
+                decoded_output_failed_size = data.size();
+              }
             }
           }
           consumed = found->second.profile->handle_host_report(
@@ -485,6 +605,14 @@ class Runtime {
               !found->second.device->send(response)) {
             std::cerr << "device " << id
                       << ": failed to dispatch host response report\n";
+          }
+          if (decoded_output_failed && !consumed && trace_rumble_) {
+            std::cout << "rumble dropped device " << id
+                      << ": output profile could not decode report"
+                      << " id=0x" << std::hex
+                      << unsigned(decoded_output_failed_report_id)
+                      << std::dec << " bytes="
+                      << decoded_output_failed_size << '\n';
           }
         }
       }
@@ -500,6 +628,7 @@ class Runtime {
         return;
       }
       if (!allow_raw_report_forward) return;
+      trace_report(id, "raw-forward", type, report_id, data);
       send_source_report(route, type, report_id, data);
     };
   }
@@ -516,10 +645,55 @@ class Runtime {
   }
 
   bool dry_run_ = false;
+  bool trace_rumble_ = false;
   IdentityOverrides overrides_;
   std::mutex mutex_;
   std::atomic<uint32_t> output_sequence_{0};
   std::unordered_map<uint32_t, Controller> controllers_;
+
+  bool rebuild_controller(uint32_t id, Controller& controller) {
+    vhid::DeviceDescription effective_description =
+        controller.source_description;
+    overrides_.apply(effective_description);
+    auto profile_unique = vhid::make_profile(effective_description);
+    if (!profile_unique) {
+      std::cerr << "device " << id
+                << ": requested output profile is not implemented yet\n";
+      return false;
+    }
+    auto profile =
+        std::shared_ptr<vhid::HidProfile>(std::move(profile_unique));
+    vhid::HidDeviceProperties properties = profile->properties();
+    overrides_.apply(properties);
+    if (controller.device && controller.profile) {
+      vhid::InputState neutral{};
+      std::fill(std::begin(neutral.hats), std::end(neutral.hats),
+                uint8_t{8});
+      controller.device->send(controller.profile->encode(neutral));
+      controller.device.reset();
+    }
+    std::unique_ptr<vhid::VirtualDevice> device;
+    if (!dry_run_) {
+      std::string error;
+      device = vhid::VirtualDevice::create_raw(
+          properties, raw_output_handler(id, controller.route),
+          get_report_handler(id), error);
+      if (!device) {
+        std::cerr << "device " << id << ": " << error << '\n';
+        return false;
+      }
+    }
+    controller.profile = profile;
+    controller.output_profile =
+        static_cast<vhid::DeviceProfile>(
+            effective_description.requested_profile);
+    controller.device = std::move(device);
+    std::cout << "device " << id << " output profile changed: "
+              << properties.product << " (profile "
+              << profile_name(effective_description.requested_profile)
+              << ", vid:pid " << vid_pid_string(properties) << ")\n";
+    return true;
+  }
 };
 
 int make_listener(const std::string& bind_host, uint16_t port) {
@@ -822,10 +996,51 @@ bool parse_profile(const std::string& text, vhid::DeviceProfile& out) {
   } else if (text == "switch-pro" || text == "switch1-pro" ||
              text == "switch-1-pro" || text == "switch-pro-controller") {
     out = vhid::DeviceProfile::switch_pro;
+  } else if (text == "switch2-pro" || text == "switch-2-pro" ||
+             text == "switch2-pro-controller" ||
+             text == "switch-2-pro-controller") {
+    out = vhid::DeviceProfile::switch_2_pro;
   } else {
     return false;
   }
   return true;
+}
+
+bool parse_runtime_profile(const std::string& text,
+                           std::optional<vhid::DeviceProfile>& out) {
+  if (text == "source" || text == "source/default" ||
+      text == "source-default" || text == "default") {
+    out.reset();
+    return true;
+  }
+  vhid::DeviceProfile profile;
+  if (!parse_profile(text, profile)) return false;
+  out = profile;
+  return true;
+}
+
+void handle_command_line(const std::string& line, Runtime& runtime) {
+  std::istringstream stream(line);
+  std::string command;
+  stream >> command;
+  if (command.empty()) return;
+  if (command == "q" || command == "Q" || command == "quit") {
+    stop_requested = 1;
+    return;
+  }
+  if (command == "profile" || command == "output-profile" ||
+      command == "set-output-profile") {
+    std::string value;
+    stream >> value;
+    std::optional<vhid::DeviceProfile> profile;
+    if (value.empty() || !parse_runtime_profile(value, profile)) {
+      std::cerr << "unknown output profile command: " << line << '\n';
+      return;
+    }
+    runtime.set_output_profile(profile);
+    return;
+  }
+  std::cerr << "unknown command: " << line << '\n';
 }
 
 void consume_udp(int socket_fd, Runtime& runtime, UdpSession* configured_source,
@@ -1024,12 +1239,14 @@ void usage(const char* name) {
   std::cerr << "usage: " << name
             << " [--bind ADDRESS] [--listen-port PORT]"
                " [--udp-source HOST[:PORT]]"
-               " [--no-physical] [--seize-physical] [--dry-run]\n"
+               " [--no-physical] [--seize-physical] [--dry-run]"
+               " [--trace-rumble]\n"
                "       [--override-vendor-id N] [--override-product-id N]\n"
                "       [--override-version N] [--override-product NAME]\n"
                "       [--override-manufacturer NAME] [--override-serial TEXT]\n"
                "       [--override-transport virtual|usb|bluetooth|ble|network]\n"
-               "       [--output-profile generic|standard-gamepad|switch-pro]\n";
+               "       [--output-profile generic|standard-gamepad|switch-pro|"
+               "switch2-pro]\n";
 }
 
 }  // namespace
@@ -1046,6 +1263,7 @@ int main(int argc, char** argv) {
   bool physical = true;
   bool seize = false;
   bool dry_run = false;
+  bool trace_rumble = false;
   IdentityOverrides identity_overrides;
   for (int i = 1; i < argc; ++i) {
     const std::string argument = argv[i];
@@ -1070,6 +1288,8 @@ int main(int argc, char** argv) {
       seize = true;
     } else if (argument == "--dry-run") {
       dry_run = true;
+    } else if (argument == "--trace-rumble") {
+      trace_rumble = true;
     } else if (argument == "--override-vendor-id" && i + 1 < argc) {
       if (!parse_u16(argv[++i], identity_overrides.vendor_id)) {
         usage(argv[0]);
@@ -1125,7 +1345,7 @@ int main(int argc, char** argv) {
               << listen_port << '\n';
     return 1;
   }
-  Runtime runtime(dry_run, std::move(identity_overrides));
+  Runtime runtime(dry_run, trace_rumble, std::move(identity_overrides));
   UdpSession udp_source;
   std::vector<UdpSession> inbound_sessions;
   uint32_t next_network_device_id = kFirstNetworkDeviceId;
@@ -1167,13 +1387,14 @@ int main(int argc, char** argv) {
   if (isatty(STDIN_FILENO)) {
     std::cout << "press q then Enter, Ctrl-C, or SIGTERM to quit\n";
   }
+  bool stdin_open = true;
+  std::string command_buffer;
   while (!stop_requested) {
     fd_set read_set;
     FD_ZERO(&read_set);
     FD_SET(udp_socket, &read_set);
     int top = udp_socket;
-    const bool read_stdin = isatty(STDIN_FILENO);
-    if (read_stdin) {
+    if (stdin_open) {
       FD_SET(STDIN_FILENO, &read_set);
       top = std::max(top, STDIN_FILENO);
     }
@@ -1186,11 +1407,19 @@ int main(int argc, char** argv) {
       consume_udp(udp_socket, runtime,
                   udp_source.enabled ? &udp_source : nullptr,
                   inbound_sessions, next_network_device_id);
-    if (read_stdin && FD_ISSET(STDIN_FILENO, &read_set)) {
-      char input[64];
+    if (stdin_open && FD_ISSET(STDIN_FILENO, &read_set)) {
+      char input[256];
       const ssize_t n = read(STDIN_FILENO, input, sizeof(input));
-      for (ssize_t i = 0; i < n; ++i) {
-        if (input[i] == 'q' || input[i] == 'Q') stop_requested = 1;
+      if (n <= 0) {
+        stdin_open = false;
+      } else {
+        command_buffer.append(input, input + n);
+        size_t newline = std::string::npos;
+        while ((newline = command_buffer.find('\n')) != std::string::npos) {
+          const std::string line = command_buffer.substr(0, newline);
+          command_buffer.erase(0, newline + 1);
+          handle_command_line(line, runtime);
+        }
       }
     }
     service_udp_session(udp_socket, runtime, udp_source, true);

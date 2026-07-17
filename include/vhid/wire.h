@@ -72,7 +72,9 @@ typedef enum {
 
 enum {
     VHID_DEVICE_ALLOW_TRANSPARENT_OUTPUT = 1u << 0,
-    VHID_SOURCE_OUTPUT_PROFILE_INFER = 0,
+    VHID_SOURCE_INPUT_PROFILE_INFER = 0,
+    VHID_SOURCE_OUTPUT_PROFILE_DEFAULT = 0,
+    VHID_SOURCE_INPUT_PROFILE_DESCRIPTOR = 0xff,
     VHID_SOURCE_OUTPUT_PROFILE_NONE = 0xff,
 };
 
@@ -106,7 +108,9 @@ typedef struct __attribute__((packed)) {
     uint8_t  product_size;
     uint8_t  manufacturer_size;
     uint8_t  serial_size;
+    uint8_t  source_input_profile;
     uint8_t  source_output_profile;
+    uint8_t  reserved;
 } vhid_hid_device_add_header_t;
 
 typedef struct __attribute__((packed)) {
@@ -128,6 +132,7 @@ typedef struct {
     uint8_t flags;
     const uint8_t* report_descriptor;
     uint16_t report_descriptor_size;
+    uint8_t source_input_profile;
     uint8_t source_output_profile;
     const char* product;
     const char* manufacturer;
@@ -138,7 +143,7 @@ VHID_STATIC_ASSERT(sizeof(vhid_message_header_t) == 28,
                    "VHB2 message header must stay wire-compatible");
 VHID_STATIC_ASSERT(sizeof(vhid_session_payload_t) == 52,
                    "VHB2 session payload must stay wire-compatible");
-VHID_STATIC_ASSERT(sizeof(vhid_hid_device_add_header_t) == 14,
+VHID_STATIC_ASSERT(sizeof(vhid_hid_device_add_header_t) == 16,
                    "VHB2 HID add header must stay wire-compatible");
 VHID_STATIC_ASSERT(sizeof(vhid_hid_report_header_t) == 4,
                    "VHB2 HID report header must stay wire-compatible");
@@ -338,7 +343,9 @@ static inline size_t vhid_make_hid_device_add(
     out[offset + 10] = (uint8_t)product_size;
     out[offset + 11] = (uint8_t)manufacturer_size;
     out[offset + 12] = (uint8_t)serial_size;
-    out[offset + 13] = device->source_output_profile;
+    out[offset + 13] = device->source_input_profile;
+    out[offset + 14] = device->source_output_profile;
+    out[offset + 15] = 0;
     offset += sizeof(vhid_hid_device_add_header_t);
     vhid_wire_copy(out + offset, device->report_descriptor,
                    device->report_descriptor_size);

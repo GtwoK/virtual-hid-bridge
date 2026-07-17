@@ -28,6 +28,11 @@ void set_string(CFMutableDictionaryRef dictionary, CFStringRef key,
   CFRelease(string);
 }
 
+void set_bool(CFMutableDictionaryRef dictionary, CFStringRef key, bool value) {
+  CFDictionarySetValue(dictionary, key,
+                       value ? kCFBooleanTrue : kCFBooleanFalse);
+}
+
 void set_usage_metadata(CFMutableDictionaryRef dictionary,
                         uint16_t usage_page, uint16_t usage) {
   if (!usage_page || !usage) return;
@@ -138,6 +143,8 @@ std::unique_ptr<VirtualDevice> VirtualDevice::create_raw(
   if (properties.vendor_id_source)
     set_number(dictionary, CFSTR(kIOHIDVendorIDSourceKey),
                static_cast<int32_t>(properties.vendor_id_source));
+  set_bool(dictionary, CFSTR("HIDVirtualDevice"), true);
+  set_bool(dictionary, CFSTR("VirtualHIDBridgeDevice"), true);
   set_usage_metadata(dictionary, properties.primary_usage_page,
                      properties.primary_usage);
   set_string(dictionary, CFSTR(kIOHIDProductKey), properties.product);

@@ -8,6 +8,8 @@ namespace vhid {
 
 std::unique_ptr<HidProfile> make_switch_pro_profile(
     const DeviceDescription& description);
+std::unique_ptr<HidProfile> make_switch2_pro_profile(
+    const DeviceDescription& description);
 
 namespace {
 
@@ -203,6 +205,9 @@ std::unique_ptr<HidProfile> make_profile(
   }
   if (requested == DeviceProfile::switch_pro) {
     return make_switch_pro_profile(description);
+  }
+  if (requested == DeviceProfile::switch_2_pro) {
+    return make_switch2_pro_profile(description);
   }
   return nullptr;
 }

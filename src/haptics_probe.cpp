@@ -170,8 +170,12 @@ std::vector<ProbeResult> run_probe() {
       continue;
     if (!source_codec->encode_output(result.decoded, result.source_report))
       continue;
-    result.source_left = parse_switch2_motor(result.source_report.data, 2);
-    result.source_right = parse_switch2_motor(result.source_report.data, 0x12);
+    std::array<uint8_t, 64> source_packet{};
+    source_packet[0] = result.source_report.report_id;
+    std::copy(result.source_report.data.begin(), result.source_report.data.end(),
+              source_packet.begin() + 1);
+    result.source_left = parse_switch2_motor(source_packet, 2);
+    result.source_right = parse_switch2_motor(source_packet, 0x12);
     results.push_back(std::move(result));
   }
   return results;
@@ -190,9 +194,8 @@ bool validate_results(const std::vector<ProbeResult>& results,
   std::set<uint16_t> source_low_codes;
   for (const auto& result : results) {
     if (result.source_report.type != vhid::HidReportType::output ||
-        result.source_report.report_id != 0 ||
-        result.source_report.data.size() != 64 ||
-        result.source_report.data[0] != 0x02) {
+        result.source_report.report_id != 0x02 ||
+        result.source_report.data.size() != 63) {
       error = "Switch 2 source report shape is wrong";
       return false;
     }

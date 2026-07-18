@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <cstring>
@@ -75,6 +76,14 @@ int16_t read_le_i16(const std::vector<uint8_t>& bytes, size_t offset) {
   return static_cast<int16_t>(
       static_cast<uint16_t>(bytes[offset]) |
       (static_cast<uint16_t>(bytes[offset + 1]) << 8));
+}
+
+std::vector<uint8_t> report_packet(const vhid::SourceReport& report) {
+  std::vector<uint8_t> packet;
+  packet.reserve(report.data.size() + (report.report_id ? 1 : 0));
+  if (report.report_id) packet.push_back(report.report_id);
+  packet.insert(packet.end(), report.data.begin(), report.data.end());
+  return packet;
 }
 
 void protocol_test() {
@@ -465,13 +474,15 @@ void source_codec_profile_test() {
   vhid::SourceReport source_rumble;
   assert(switch2_output_codec->encode_output(rumble, source_rumble));
   assert(source_rumble.type == vhid::HidReportType::output);
-  assert(source_rumble.report_id == 0);
-  assert(source_rumble.data.size() == 64);
-  assert(source_rumble.data[0] == 0x02);
-  assert((source_rumble.data[1] & 0xF0) == 0x50);
-  assert(std::equal(source_rumble.data.begin() + 1,
-                    source_rumble.data.begin() + 7,
-                    source_rumble.data.begin() + 0x11));
+  assert(source_rumble.report_id == 0x02);
+  assert(source_rumble.data.size() == 63);
+  const auto source_packet = report_packet(source_rumble);
+  assert(source_packet.size() == 64);
+  assert(source_packet[0] == 0x02);
+  assert((source_packet[1] & 0xF0) == 0x50);
+  assert(std::equal(source_packet.begin() + 1,
+                    source_packet.begin() + 7,
+                    source_packet.begin() + 0x11));
 
   const auto switch2_high_frequency = [](const std::vector<uint8_t>& data,
                                          size_t offset) {
@@ -484,9 +495,9 @@ void source_codec_profile_test() {
                                  ((data[offset + 3] & 0x3Fu) << 4));
   };
   const uint16_t default_switch2_high =
-      switch2_high_frequency(source_rumble.data, 2);
+      switch2_high_frequency(source_packet, 2);
   const uint16_t default_switch2_low =
-      switch2_low_frequency(source_rumble.data, 2);
+      switch2_low_frequency(source_packet, 2);
   const uint8_t switch1_tone_bytes[] = {
       0x68, 0xBE, 0xBA, 0x6F,
       0x98, 0x1C, 0x46, 0x47,
@@ -495,13 +506,18 @@ void source_codec_profile_test() {
   vhid::decode_switch1_hd_rumble(switch1_tone_bytes, switch1_tone);
   vhid::SourceReport switch2_tone;
   assert(switch2_output_codec->encode_output(switch1_tone, switch2_tone));
-  assert(switch2_tone.data.size() == 64);
-  assert(switch2_high_frequency(switch2_tone.data, 2) != default_switch2_high);
-  assert(switch2_low_frequency(switch2_tone.data, 2) != default_switch2_low);
-  assert(switch2_high_frequency(switch2_tone.data, 0x12) !=
-         switch2_high_frequency(switch2_tone.data, 2));
-  assert(switch2_low_frequency(switch2_tone.data, 0x12) !=
-         switch2_low_frequency(switch2_tone.data, 2));
+  const auto switch2_tone_packet = report_packet(switch2_tone);
+  assert(switch2_tone.report_id == 0x02);
+  assert(switch2_tone.data.size() == 63);
+  assert(switch2_tone_packet.size() == 64);
+  assert(switch2_high_frequency(switch2_tone_packet, 2) !=
+         default_switch2_high);
+  assert(switch2_low_frequency(switch2_tone_packet, 2) !=
+         default_switch2_low);
+  assert(switch2_high_frequency(switch2_tone_packet, 0x12) !=
+         switch2_high_frequency(switch2_tone_packet, 2));
+  assert(switch2_low_frequency(switch2_tone_packet, 0x12) !=
+         switch2_low_frequency(switch2_tone_packet, 2));
 
   vhid::OutputState split_rumble{};
   vhid::HapticMotorState left_motor{};
@@ -517,11 +533,13 @@ void source_codec_profile_test() {
   vhid::SourceReport split_source_rumble;
   assert(switch2_output_codec->encode_output(split_rumble,
                                              split_source_rumble));
-  assert(split_source_rumble.data.size() == 64);
-  assert(!std::equal(split_source_rumble.data.begin() + 2,
-                     split_source_rumble.data.begin() + 7,
-                     split_source_rumble.data.begin() + 0x12));
-  assert(split_source_rumble.data[0x11] == split_source_rumble.data[1]);
+  const auto split_source_packet = report_packet(split_source_rumble);
+  assert(split_source_rumble.report_id == 0x02);
+  assert(split_source_rumble.data.size() == 63);
+  assert(!std::equal(split_source_packet.begin() + 2,
+                     split_source_packet.begin() + 7,
+                     split_source_packet.begin() + 0x12));
+  assert(split_source_packet[0x11] == split_source_packet[1]);
 
   auto source_profile = vhid::make_profile(test_description());
   assert(source_profile);
@@ -671,6 +689,7 @@ void switch2_source_codec_test() {
   source.angular_velocity[1] = -0.5f;
   source.angular_velocity[2] = 0.125f;
   auto encoded = source_profile->encode(source);
+  assert(encoded[0] == 0x05);
   assert(read_le_i16(encoded, 0x37) >= 235);
   assert(read_le_i16(encoded, 0x37) <= 236);
   assert(read_le_i16(encoded, 0x39) >= -118);
@@ -696,10 +715,12 @@ void switch2_source_codec_test() {
                          invert_axis(source.axes[1]));
   pack_raw_switch2_stick(&encoded[14], source.axes[2],
                          invert_axis(source.axes[3]));
+  const std::vector<uint8_t> payload(encoded.begin() + 1, encoded.end());
   assert(encoded.size() == 64);
+  assert(payload.size() == 63);
   const auto input = vhid::make_hid_report(
       vhid::MessageType::hid_input_report, 83, 2, 1100,
-      vhid::HidReportType::input, 0, encoded);
+      vhid::HidReportType::input, 0x05, payload);
   assert(vhid::parse_message(input, parsed));
   vhid::ParsedHidReport parsed_report;
   assert(vhid::parse_hid_report(parsed.payload, parsed_report));
@@ -746,20 +767,23 @@ void switch2_native_udp_button_round_trip_test() {
   auto source_codec = vhid::make_source_input_codec(parsed_device, error);
   assert(source_codec);
 
-  std::vector<uint8_t> source_report(64);
-  source_report[5] = 0xCF;
-  source_report[6] = 0x7F;
-  source_report[7] = 0xCF;
-  source_report[8] = 0x03;
-  source_report[11] = 0x00;
-  source_report[12] = 0x08;
-  source_report[13] = 0x80;
-  source_report[14] = 0x00;
-  source_report[15] = 0x08;
-  source_report[16] = 0x80;
+  std::vector<uint8_t> source_packet(64);
+  source_packet[0] = 0x05;
+  source_packet[5] = 0xCF;
+  source_packet[6] = 0x7F;
+  source_packet[7] = 0xCF;
+  source_packet[8] = 0x03;
+  source_packet[11] = 0x00;
+  source_packet[12] = 0x08;
+  source_packet[13] = 0x80;
+  source_packet[14] = 0x00;
+  source_packet[15] = 0x08;
+  source_packet[16] = 0x80;
+  std::vector<uint8_t> source_report(source_packet.begin() + 1,
+                                     source_packet.end());
   const auto input = vhid::make_hid_report(
       vhid::MessageType::hid_input_report, 84, 2, 1100,
-      vhid::HidReportType::input, 0, source_report);
+      vhid::HidReportType::input, 0x05, source_report);
   assert(vhid::parse_message(input, parsed));
   vhid::ParsedHidReport parsed_report;
   assert(vhid::parse_hid_report(parsed.payload, parsed_report));
@@ -769,10 +793,11 @@ void switch2_native_udp_button_round_trip_test() {
   auto output_profile = vhid::make_profile(source_codec->description());
   assert(output_profile);
   const auto output = output_profile->encode(decoded);
-  assert(output[5] == source_report[5]);
-  assert(output[6] == source_report[6]);
-  assert(output[7] == source_report[7]);
-  assert(output[8] == source_report[8]);
+  assert(output[0] == 0x05);
+  assert(output[5] == 0xCF);
+  assert(output[6] == 0x7F);
+  assert(output[7] == 0xCF);
+  assert(output[8] == 0x03);
 }
 
 void mapping_test() {
@@ -1043,11 +1068,17 @@ void switch2_profile_test() {
   assert(properties.primary_usage == 0x05);
   assert(properties.vendor_id_source == 1);
   assert(!properties.report_descriptor.empty());
+  const std::array<uint8_t, 2> input_report_id_item{0x85, 0x05};
+  auto descriptor_report_id = std::search(
+      properties.report_descriptor.begin(), properties.report_descriptor.end(),
+      input_report_id_item.begin(), input_report_id_item.end());
+  assert(descriptor_report_id != properties.report_descriptor.end());
 
   vhid::InputState neutral{};
   std::fill(std::begin(neutral.hats), std::end(neutral.hats), uint8_t{8});
   const auto neutral_report = profile->encode(neutral);
   assert(neutral_report.size() == 64);
+  assert(neutral_report[0] == 0x05);
   assert(neutral_report[5] == 0);
   assert(neutral_report[6] == 0);
   assert(neutral_report[7] == 0);
@@ -1060,6 +1091,18 @@ void switch2_profile_test() {
   assert(neutral_report[16] == 0x80);
   assert(neutral_report[0x2B] || neutral_report[0x2C] ||
          neutral_report[0x2D] || neutral_report[0x2E]);
+
+  std::vector<uint8_t> haptic_payload(63);
+  haptic_payload[0] = 0x50;
+  assert(profile->forward_host_report_to_source(
+      vhid::HidReportType::output, 0x02, haptic_payload));
+  assert(!profile->forward_host_report_to_source(
+      vhid::HidReportType::output, 0x03, haptic_payload));
+  std::vector<uint8_t> response;
+  assert(profile->handle_host_report(vhid::HidReportType::output, 0x02,
+                                     haptic_payload, response));
+  assert(!profile->handle_host_report(vhid::HidReportType::output, 0x03,
+                                      haptic_payload, response));
 
   vhid::InputState face{};
   std::fill(std::begin(face.hats), std::end(face.hats), uint8_t{8});
@@ -1182,9 +1225,12 @@ void switch2_profile_test() {
 
   uint8_t get_report[64]{};
   size_t get_report_size = sizeof(get_report);
-  assert(profile->get_host_report(vhid::HidReportType::input, 0,
+  assert(profile->get_host_report(vhid::HidReportType::input, 0x05,
                                   get_report, get_report_size));
-  assert(get_report_size == 64);
+  assert(get_report_size == 63);
+  get_report_size = sizeof(get_report);
+  assert(!profile->get_host_report(vhid::HidReportType::input, 0x09,
+                                   get_report, get_report_size));
 }
 
 }  // namespace

@@ -2,12 +2,14 @@
 #include "vhid/haptics.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 
 namespace vhid {
 namespace {
 
+constexpr uint8_t kInputReport = 0x05;
 constexpr uint8_t kOutputRumble = 0x02;
 constexpr uint16_t kSwitch2VendorId = 0x057e;
 constexpr uint16_t kSwitch2ProProductId = 0x2069;
@@ -18,9 +20,10 @@ constexpr float kSwitch2GyroRadiansPerSecond = 34.8f;
 constexpr uint8_t kSwitch2ProReportDescriptor[] = {
     0x05, 0x01, 0x09, 0x05, 0xA1, 0x01,
 
+    0x85, kInputReport,
     0x06, 0x00, 0xFF, 0x09, 0x01,
     0x15, 0x00, 0x26, 0xFF, 0x00,
-    0x75, 0x08, 0x95, 0x05, 0x81, 0x03,
+    0x75, 0x08, 0x95, 0x04, 0x81, 0x03,
 
     0x05, 0x09,
     0x19, 0x01, 0x29, 0x08,
@@ -61,9 +64,9 @@ constexpr uint8_t kSwitch2ProReportDescriptor[] = {
     0x15, 0x00, 0x26, 0xFF, 0x00,
     0x75, 0x08, 0x95, 0x03, 0x81, 0x03,
 
-    0x09, 0x05,
+    0x85, kOutputRumble, 0x09, 0x05,
     0x15, 0x00, 0x26, 0xFF, 0x00,
-    0x75, 0x08, 0x95, 0x40, 0x91, 0x02,
+    0x75, 0x08, 0x95, 0x3F, 0x91, 0x02,
     0xC0,
 };
 
@@ -147,6 +150,12 @@ std::vector<uint8_t> make_switch2_rumble_report(
 
 bool decode_switch2_rumble_report(std::span<const uint8_t> report,
                                   OutputState& output) {
+  std::array<uint8_t, 64> packet{};
+  if (report.size() == 63) {
+    packet[0] = kOutputRumble;
+    std::copy(report.begin(), report.end(), packet.begin() + 1);
+    report = std::span<const uint8_t>(packet);
+  }
   if (report.size() < 64 || report[0] != kOutputRumble) return false;
   output = {};
   HapticMotorState left{};
@@ -187,8 +196,49 @@ class Switch2ProProfile final : public HidProfile {
   }
 
   std::vector<uint8_t> encode(const InputState& state) const override {
+    return encode_input_report(state);
+  }
+
+  bool decode_output(std::span<const uint8_t> report,
+                     OutputState& output) const override {
+    return decode_switch2_rumble_report(report, output);
+  }
+
+  bool handle_host_report(HidReportType type, uint8_t report_id,
+                          std::span<const uint8_t> report,
+                          std::vector<uint8_t>& response) override {
+    (void)response;
+    return type == HidReportType::output &&
+           (report_id == kOutputRumble ||
+            (!report.empty() && report[0] == kOutputRumble));
+  }
+
+  bool forward_host_report_to_source(
+      HidReportType type, uint8_t report_id,
+      std::span<const uint8_t> report) const override {
+    if (type != HidReportType::output) return true;
+    return report_id == kOutputRumble ||
+           (!report.empty() && report[0] == kOutputRumble);
+  }
+
+  bool get_host_report(HidReportType type, uint8_t report_id,
+                       std::span<uint8_t> report,
+                       size_t& report_size) override {
+    if (type != HidReportType::input || report_id != kInputReport)
+      return false;
+    const auto source = encode_input_report(last_state_);
+    const size_t payload_size = source.size() - 1;
+    if (report.size() < payload_size) return false;
+    std::copy(source.begin() + 1, source.end(), report.begin());
+    report_size = payload_size;
+    return true;
+  }
+
+ private:
+  std::vector<uint8_t> encode_input_report(const InputState& state) const {
     last_state_ = state;
     std::vector<uint8_t> report(64);
+    report[0] = kInputReport;
 
     if (button_pressed(state, 2)) report[5] |= 0x01;
     if (button_pressed(state, 3)) report[5] |= 0x02;
@@ -231,33 +281,6 @@ class Switch2ProProfile final : public HidProfile {
     write_i16(&report[0x3B], encode_angular_velocity(state.angular_velocity[1]));
     return report;
   }
-
-  bool decode_output(std::span<const uint8_t> report,
-                     OutputState& output) const override {
-    return decode_switch2_rumble_report(report, output);
-  }
-
-  bool handle_host_report(HidReportType type, uint8_t report_id,
-                          std::span<const uint8_t> report,
-                          std::vector<uint8_t>& response) override {
-    (void)report_id;
-    (void)response;
-    return type == HidReportType::output &&
-           !report.empty() && report[0] == kOutputRumble;
-  }
-
-  bool get_host_report(HidReportType type, uint8_t report_id,
-                       std::span<uint8_t> report,
-                       size_t& report_size) override {
-    if (type != HidReportType::input || report_id != 0) return false;
-    const auto source = encode(last_state_);
-    if (report.size() < source.size()) return false;
-    std::copy(source.begin(), source.end(), report.begin());
-    report_size = source.size();
-    return true;
-  }
-
- private:
   HidDeviceProperties properties_{};
   mutable InputState last_state_{};
   bool has_hat_ = false;

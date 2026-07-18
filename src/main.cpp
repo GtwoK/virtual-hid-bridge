@@ -424,7 +424,7 @@ class Runtime {
     const auto report =
         controller.profile->encode(
             vhid::apply_mapping(state, controller.mapping));
-    if (controller.device && !controller.device->send(report))
+    if (controller.device && !controller.device->send_latest(report))
       std::cerr << "device " << id << ": failed to dispatch HID report\n";
   }
 
@@ -451,7 +451,7 @@ class Runtime {
       const auto report =
           controller.profile->encode(
               vhid::apply_mapping(state, controller.mapping));
-      if (controller.device && !controller.device->send(report))
+      if (controller.device && !controller.device->send_latest(report))
         std::cerr << "device " << id
                   << ": failed to dispatch decoded HID report\n";
       return;
@@ -463,7 +463,7 @@ class Runtime {
     if (source.header->report_id)
       report.push_back(source.header->report_id);
     report.insert(report.end(), source.data.begin(), source.data.end());
-    if (controller.device && !controller.device->send(report))
+    if (controller.device && !controller.device->send_latest(report))
       std::cerr << "device " << id << ": failed to dispatch raw HID report\n";
   }
 
@@ -559,7 +559,9 @@ class Runtime {
         if (found != controllers_.end() && found->second.profile) {
           allow_raw_report_forward = found->second.raw_hid;
           if (type != vhid::HidReportType::input && route.supports_output &&
-              found->second.source_output_codec) {
+              found->second.source_output_codec &&
+              found->second.profile->forward_host_report_to_source(
+                  type, report_id, data)) {
             auto& codec = *found->second.source_output_codec;
             if (codec.accepts_native_reports_from(
                     found->second.output_profile)) {

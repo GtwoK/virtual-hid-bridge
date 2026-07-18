@@ -8,6 +8,10 @@
 
 #include <dispatch/dispatch.h>
 
+#include <atomic>
+#include <mutex>
+#include <vector>
+
 namespace vhid {
 namespace {
 
@@ -73,11 +77,24 @@ bool convert_report_type(IOHIDReportType type, HidReportType& wire_type) {
 class MacVirtualDevice final : public VirtualDevice {
  public:
   MacVirtualDevice(IOHIDUserDeviceRef device, dispatch_semaphore_t cancelled)
-      : device_(device), cancelled_(cancelled) {}
+      : device_(device),
+        cancelled_(cancelled),
+        input_queue_(dispatch_queue_create(
+            "org.virtualhidbridge.input",
+            dispatch_queue_attr_make_with_qos_class(
+                DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0))) {}
 
   ~MacVirtualDevice() override {
     if (!device_) return;
+    closed_.store(true);
+    {
+      std::lock_guard lock(input_mutex_);
+      latest_input_report_.clear();
+    }
     IOHIDUserDeviceCancel(device_);
+    if (input_queue_)
+      dispatch_sync(input_queue_, ^{
+      });
     dispatch_semaphore_wait(
         cancelled_,
         dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC));
@@ -85,15 +102,54 @@ class MacVirtualDevice final : public VirtualDevice {
   }
 
   bool send(std::span<const uint8_t> report) override {
+    return send_now(report);
+  }
+
+  bool send_latest(std::span<const uint8_t> report) override {
+    if (!device_ || !input_queue_ || report.empty()) return false;
+    if (closed_.load()) return false;
+    {
+      std::lock_guard lock(input_mutex_);
+      latest_input_report_.assign(report.begin(), report.end());
+      if (input_send_scheduled_) return true;
+      input_send_scheduled_ = true;
+    }
+    dispatch_async(input_queue_, ^{
+      drain_latest_input_reports();
+    });
+    return true;
+  }
+
+ private:
+  bool send_now(std::span<const uint8_t> report) {
     if (!device_ || report.empty()) return false;
     return IOHIDUserDeviceHandleReportWithTimeStamp(
                device_, mach_absolute_time(), report.data(),
                static_cast<CFIndex>(report.size())) == kIOReturnSuccess;
   }
 
- private:
+  void drain_latest_input_reports() {
+    for (;;) {
+      std::vector<uint8_t> report;
+      {
+        std::lock_guard lock(input_mutex_);
+        if (closed_.load() || latest_input_report_.empty()) {
+          input_send_scheduled_ = false;
+          return;
+        }
+        report.swap(latest_input_report_);
+      }
+      send_now(report);
+    }
+  }
+
   IOHIDUserDeviceRef device_ = nullptr;
   dispatch_semaphore_t cancelled_ = nullptr;
+  dispatch_queue_t input_queue_ = nullptr;
+  std::atomic<bool> closed_{false};
+  std::mutex input_mutex_;
+  std::vector<uint8_t> latest_input_report_;
+  bool input_send_scheduled_ = false;
 };
 
 }  // namespace

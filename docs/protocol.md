@@ -115,9 +115,11 @@ Native input codecs own their whole source report contract, including buttons,
 hats, sticks, battery and motion.
 
 Switch 2 Pro native input uses the USB packet layout also used by SDL: report
-ID `0`, a 64-byte payload, button bytes at offsets 5..8, 12-bit sticks at
-offsets 11 and 14, and IMU samples at offsets `0x31..0x3c`. This is not the
-public HID `0x09` report layout used by Linux/BlueZ experiments.
+ID `0x05`, a 63-byte HID payload, button bytes at full-packet offsets 5..8,
+12-bit sticks at full-packet offsets 11 and 14, and IMU samples at full-packet
+offsets `0x31..0x3c`. The Switch 2 Pro virtual output profile emits the same
+report ID `0x05` shape and exposes Switch 2 USB report ID `0x02` for haptics.
+The public HID `0x09` Pro input report is not part of this profile.
 
 Source output reports are source-native. If the selected virtual output profile
 and source output profile match, the bridge forwards the profile-native output

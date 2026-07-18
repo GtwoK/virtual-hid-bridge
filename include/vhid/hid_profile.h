@@ -42,6 +42,14 @@ class HidProfile {
     (void)response;
     return false;
   }
+  virtual bool forward_host_report_to_source(
+      HidReportType type, uint8_t report_id,
+      std::span<const uint8_t> report) const {
+    (void)type;
+    (void)report_id;
+    (void)report;
+    return true;
+  }
   virtual bool get_host_report(HidReportType type, uint8_t report_id,
                                std::span<uint8_t> report,
                                size_t& report_size) {
@@ -66,6 +74,9 @@ class VirtualDevice {
 
   virtual ~VirtualDevice() = default;
   virtual bool send(std::span<const uint8_t> report) = 0;
+  virtual bool send_latest(std::span<const uint8_t> report) {
+    return send(report);
+  }
 
   static std::unique_ptr<VirtualDevice> create(
       const HidDeviceProperties& properties,

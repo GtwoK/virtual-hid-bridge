@@ -162,11 +162,11 @@ translation is explicit codec work: HD formats remap frequency/amplitude through
 their native tables, while simpler ERM/on-off devices downmix by motor, band
 and energy. Any dropped dimensions should be visible in trace output.
 
-Switch 2 Pro currently follows the USB report-format-5 packet layout also used
-by SDL: 64-byte reports with no HID report ID, the known button/stick offsets,
-the known IMU offsets and the USB output `0x02` haptics envelope. That is a
-different native contract from the public HID `0x09` input layout, and it does
-not mean the bridge mirrors SDL's simplified rumble policy.
+Switch 2 Pro source input currently follows the USB report-format-5 packet
+layout also used by SDL: input report ID `0x05`, a 63-byte HID payload, the
+known button/stick offsets, the known IMU offsets and the USB output `0x02`
+haptics envelope. The virtual Switch 2 Pro output profile presents that same
+single input report ID `0x05` shape.
 
 ## Mapping UI
 

@@ -17,8 +17,7 @@ This is an early but testable foundation:
 - initial Switch 1 Pro Controller and Switch 2 Pro Controller output profiles
   with Nintendo identity, native packet encoders and source haptics forwarding;
   Switch 1 uses Nintendo HD rumble motor packets, while Switch 2 Pro uses the
-  known USB report-format-5 packet layout rather than the public HID `0x09`
-  input path
+  known USB report-format-5 layout
 - mapping/calibration core and unit tests
 - an entitlement-sensitive macOS virtual-device publisher for signed builds
 - a small AppKit UI that starts/stops the bridge, edits runtime settings and
@@ -201,10 +200,11 @@ There is no universal packet layout shared by USB, Bluetooth and UDP.
   the bridge to infer a known native input codec from VID/PID, or name a known
   input codec. Unknown or unimplemented input codecs fall back to generic
   descriptor decoding.
-- The Switch 2 Pro native codec uses the USB packet layout also used by SDL:
-  report ID `0`, 64-byte packets, buttons at bytes 5..8, sticks at bytes
-  11..16 and IMU fields at bytes `0x31..0x3c`. It is intentionally separate
-  from the Linux/BlueZ HID `0x09` report shape.
+- The Switch 2 Pro native source codec uses the USB packet layout also used by
+  SDL: report ID `0x05`, 63-byte HID payloads, buttons at full-packet bytes
+  5..8, sticks at full-packet bytes 11..16 and IMU fields at full-packet bytes
+  `0x31..0x3c`. The Switch 2 Pro virtual output profile emits that same
+  report ID `0x05` shape and exposes Switch 2 USB report ID `0x02` for haptics.
 - Source input and source output codecs are independent. A generic-HID input
   source may explicitly request Switch Pro output reports for its return path,
   and a native source may disable source output entirely.
@@ -251,7 +251,7 @@ on a trusted isolated LAN.
 - `src/mapping.cpp`: button routes and per-axis calibration
 - `src/generic_hid_profile.cpp`: generated build-your-own HID descriptor/reports
 - `src/switch_pro_profile.cpp`: Switch 1 Pro descriptor, report encoder and host setup replies
-- `src/switch2_pro_profile.cpp`: Switch 2 Pro USB report-format-5 encoder and haptics envelope
+- `src/switch2_pro_profile.cpp`: Switch 2 Pro report-format-5 encoder and haptics envelope
 - `include/vhid/wire.h`: C-compatible sender helpers and wire constants
 
 See `docs/protocol.md` and `docs/architecture.md` for the current design and

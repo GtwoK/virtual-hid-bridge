@@ -555,11 +555,18 @@ class Switch2ProSourceCodec final : public SourceInputCodec {
   bool decode_input(const ParsedHidReport& report,
                     InputState& state) override {
     if (report.header->report_type !=
-        static_cast<uint8_t>(HidReportType::input) ||
-        report.header->report_id != 0 || report.data.size() < 64) {
+        static_cast<uint8_t>(HidReportType::input)) {
       return false;
     }
-    const auto packet = report.data.first(64);
+    std::array<uint8_t, 64> packet_storage{};
+    std::span<const uint8_t> packet;
+    if (report.header->report_id == 0x05 && report.data.size() == 63) {
+      packet_storage[0] = 0x05;
+      std::copy_n(report.data.begin(), 63, packet_storage.begin() + 1);
+      packet = std::span<const uint8_t>(packet_storage);
+    } else {
+      return false;
+    }
 
     uint64_t buttons = 0;
     const uint8_t right = packet[5];
@@ -880,8 +887,9 @@ class Switch2ProSourceOutputCodec final : public SourceOutputCodec {
   bool encode_output(const OutputState& output,
                      SourceReport& report) override {
     report.type = HidReportType::output;
-    report.report_id = 0;
-    report.data = make_switch2_pro_rumble_report(output, sequence_++);
+    const auto packet = make_switch2_pro_rumble_report(output, sequence_++);
+    report.report_id = packet[0];
+    report.data.assign(packet.begin() + 1, packet.end());
     return true;
   }
 

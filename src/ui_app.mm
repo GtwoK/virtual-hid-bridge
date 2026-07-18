@@ -25,6 +25,7 @@
 @property(nonatomic, strong) NSTextField* serialField;
 @property(nonatomic, strong) NSPopUpButton* transportPopup;
 @property(nonatomic, strong) NSPopUpButton* profilePopup;
+@property(nonatomic, strong) NSButton* applyProfileButton;
 @property(nonatomic, strong) NSTextField* statusLabel;
 @property(nonatomic, strong) NSButton* startStopButton;
 @property(nonatomic, strong) NSButton* noPhysicalCheck;
@@ -188,23 +189,28 @@
 
   y -= 40;
   NSTextField* identityTitle =
-      [self label:@"Virtual device identity overrides (blank = source/default)"
+      [self label:@"Virtual device identity"
             frame:NSMakeRect(20, y, 460, 22)];
   identityTitle.font = [NSFont boldSystemFontOfSize:13];
   [content addSubview:identityTitle];
 
   [content addSubview:[self label:@"Output profile"
-                            frame:NSMakeRect(610, y, 95, 22)]];
+                            frame:NSMakeRect(565, y, 95, 22)]];
   self.profilePopup =
-      [[NSPopUpButton alloc] initWithFrame:NSMakeRect(710, y - 2, 220, 26)
+      [[NSPopUpButton alloc] initWithFrame:NSMakeRect(665, y - 2, 180, 26)
                                  pullsDown:NO];
   [self.profilePopup addItemsWithTitles:@[
-    @"Source/default", @"Generic HID", @"Standard Gamepad",
-    @"Switch 1 Pro Controller", @"Switch 2 Pro Controller"
+    @"Generic HID", @"Switch 1 Pro Controller", @"Switch 2 Pro Controller"
   ]];
-  self.profilePopup.target = self;
-  self.profilePopup.action = @selector(outputProfileChanged:);
   [content addSubview:self.profilePopup];
+
+  self.applyProfileButton =
+      [[NSButton alloc] initWithFrame:NSMakeRect(855, y - 1, 90, 26)];
+  self.applyProfileButton.title = @"Set selected";
+  self.applyProfileButton.bezelStyle = NSBezelStyleRounded;
+  self.applyProfileButton.target = self;
+  self.applyProfileButton.action = @selector(applySelectedOutputProfile:);
+  [content addSubview:self.applyProfileButton];
 
   y -= 30;
   [content addSubview:[self label:@"VID"
@@ -231,7 +237,7 @@
       [[NSPopUpButton alloc] initWithFrame:NSMakeRect(505, y - 2, 165, 26)
                                  pullsDown:NO];
   [self.transportPopup addItemsWithTitles:@[
-    @"Source/default", @"Virtual", @"USB", @"Bluetooth",
+    @"Unchanged", @"Virtual", @"USB", @"Bluetooth",
     @"Bluetooth Low Energy", @"Network"
   ]];
   [content addSubview:self.transportPopup];
@@ -346,10 +352,9 @@
 - (NSString*)profileCommandValue {
   NSString* profile = self.profilePopup.titleOfSelectedItem;
   if ([profile isEqualToString:@"Generic HID"]) return @"generic";
-  if ([profile isEqualToString:@"Standard Gamepad"]) return @"standard-gamepad";
   if ([profile isEqualToString:@"Switch 1 Pro Controller"]) return @"switch-pro";
   if ([profile isEqualToString:@"Switch 2 Pro Controller"]) return @"switch2-pro";
-  return @"source";
+  return @"generic";
 }
 
 - (void)sendBridgeCommand:(NSString*)command {
@@ -365,11 +370,18 @@
   }
 }
 
-- (void)outputProfileChanged:(id)sender {
+- (void)applySelectedOutputProfile:(id)sender {
   (void)sender;
   if (!self.task || !self.task.isRunning) return;
+  NSInteger row = self.tableView.selectedRow;
+  if (row < 0 || row >= (NSInteger)self.devices.count) {
+    [self appendLine:@"warning: select a device before setting its profile"];
+    return;
+  }
+  NSString* deviceId = self.devices[(NSUInteger)row].deviceId;
   [self sendBridgeCommand:
-      [NSString stringWithFormat:@"profile %@", [self profileCommandValue]]];
+      [NSString stringWithFormat:@"profile %@ %@", deviceId,
+                                 [self profileCommandValue]]];
 }
 
 - (void)startBridge {
@@ -401,10 +413,6 @@
   }
   if (self.traceRumbleCheck.state == NSControlStateValueOn) {
     [arguments addObject:@"--trace-rumble"];
-  }
-  NSString* profileCommand = [self profileCommandValue];
-  if (![profileCommand isEqualToString:@"source"]) {
-    [arguments addObjectsFromArray:@[ @"--output-profile", profileCommand ]];
   }
   [self addArgument:@"--override-vendor-id"
           fromField:self.vendorIdField

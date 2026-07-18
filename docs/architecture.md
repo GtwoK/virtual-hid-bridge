@@ -54,9 +54,17 @@ known native controller profile. Unknown or unimplemented input profiles fall
 back to generic descriptor-backed HID so a sender can remain useful with just a
 standard report descriptor.
 
+The virtual output profile is per logical controller. By default, the bridge
+uses the profile advertised or inferred from the input controller when that
+output profile is implemented. If it is not implemented, the controller is
+published as Generic HID. The command-line output-profile setting chooses the
+starting output profile for decoded controllers, and runtime
+`profile DEVICE_ID PROFILE` commands can change one decoded controller
+regardless of transport.
+
 Input descriptors do not define a universal haptics format. Source output uses
-a source output codec selected from `source_output_profile`, or from the source
-input profile when the output field is left at its default. When that source
+a source output codec selected from `source_output_profile`, or derived from a
+known native source input profile when that field is `0`. When that source
 output profile matches the selected virtual output profile, output reports can
 be forwarded as native bytes. Otherwise the bridge needs a real source-native
 encoder for that controller family.

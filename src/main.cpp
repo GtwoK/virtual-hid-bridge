@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -40,6 +41,9 @@ constexpr uint64_t kSessionOpenRetryUs = 5'000'000;
 constexpr uint64_t kSessionKeepaliveUs = 5'000'000;
 constexpr uint64_t kSessionTimeoutUs = 15'000'000;
 constexpr uint32_t kFirstNetworkDeviceId = 0x40000000u;
+constexpr uint16_t kNintendoVendorId = 0x057e;
+constexpr uint16_t kSwitchProProductId = 0x2009;
+constexpr uint16_t kSwitch2ProProductId = 0x2069;
 
 uint64_t now_us() {
   return std::chrono::duration_cast<std::chrono::microseconds>(
@@ -82,6 +86,37 @@ std::string vid_pid_string(const vhid::HidDeviceProperties& properties) {
   return buffer;
 }
 
+bool implemented_output_profile(vhid::DeviceProfile profile) {
+  switch (profile) {
+    case vhid::DeviceProfile::generic:
+    case vhid::DeviceProfile::switch_pro:
+    case vhid::DeviceProfile::switch_2_pro:
+      return true;
+    case vhid::DeviceProfile::standard_gamepad:
+    case vhid::DeviceProfile::dualshock_4:
+    case vhid::DeviceProfile::dualsense:
+    case vhid::DeviceProfile::xbox:
+      return false;
+  }
+  return false;
+}
+
+vhid::DeviceProfile default_output_profile(
+    const vhid::DeviceDescription& description) {
+  const auto advertised =
+      static_cast<vhid::DeviceProfile>(description.requested_profile);
+  if (implemented_output_profile(advertised)) return advertised;
+  if (description.vendor_id == kNintendoVendorId &&
+      description.product_id == kSwitchProProductId) {
+    return vhid::DeviceProfile::switch_pro;
+  }
+  if (description.vendor_id == kNintendoVendorId &&
+      description.product_id == kSwitch2ProProductId) {
+    return vhid::DeviceProfile::switch_2_pro;
+  }
+  return vhid::DeviceProfile::generic;
+}
+
 struct Route {
   int socket = -1;
   sockaddr_storage address{};
@@ -112,7 +147,6 @@ struct UdpSession {
 };
 
 struct IdentityOverrides {
-  bool profile_set = false;
   bool vendor_id_set = false;
   bool product_id_set = false;
   bool version_number_set = false;
@@ -120,7 +154,6 @@ struct IdentityOverrides {
   bool manufacturer_set = false;
   bool serial_set = false;
   bool transport_set = false;
-  vhid::DeviceProfile profile = vhid::DeviceProfile::generic;
   uint16_t vendor_id = 0;
   uint16_t product_id = 0;
   uint16_t version_number = 0;
@@ -137,8 +170,6 @@ struct IdentityOverrides {
   }
 
   void apply(vhid::DeviceDescription& description) const {
-    if (profile_set)
-      description.requested_profile = static_cast<uint8_t>(profile);
     if (vendor_id_set) description.vendor_id = vendor_id;
     if (product_id_set) description.product_id = product_id;
     if (version_number_set) description.version_number = version_number;
@@ -170,6 +201,7 @@ struct Controller {
   std::unique_ptr<vhid::SourceOutputCodec> source_output_codec;
   std::unique_ptr<vhid::VirtualDevice> device;
   Route route;
+  std::optional<vhid::DeviceProfile> output_profile_selection;
   vhid::DeviceProfile output_profile = vhid::DeviceProfile::generic;
   uint32_t last_sequence = 0;
   bool have_sequence = false;
@@ -178,17 +210,20 @@ struct Controller {
 
 class Runtime {
  public:
-  Runtime(bool dry_run, bool trace_rumble, IdentityOverrides overrides)
+  Runtime(bool dry_run, bool trace_rumble,
+          std::optional<vhid::DeviceProfile> output_profile_setting,
+          IdentityOverrides identity_overrides)
       : dry_run_(dry_run),
         trace_rumble_(trace_rumble),
-        overrides_(std::move(overrides)) {}
+        output_profile_setting_(output_profile_setting),
+        identity_overrides_(std::move(identity_overrides)) {}
 
   bool add_semantic(uint32_t id,
                     const vhid::DeviceDescription& description,
                     const Route& route = {}) {
     std::lock_guard lock(mutex_);
     vhid::DeviceDescription effective_description = description;
-    overrides_.apply(effective_description);
+    apply_description_overrides(effective_description, std::nullopt);
     auto profile_unique = vhid::make_profile(effective_description);
     if (!profile_unique) {
       std::cerr << "device " << id
@@ -198,7 +233,7 @@ class Runtime {
     auto profile =
         std::shared_ptr<vhid::HidProfile>(std::move(profile_unique));
     vhid::HidDeviceProperties properties = profile->properties();
-    overrides_.apply(properties);
+    identity_overrides_.apply(properties);
     Controller controller;
     controller.source_description = description;
     controller.profile = profile;
@@ -236,7 +271,7 @@ class Runtime {
     auto source_input_codec =
         vhid::make_source_input_codec(source, decode_error);
     if (!source_input_codec) {
-      if (!overrides_.profile_set &&
+      if (!output_profile_setting_ &&
           (source.header->flags & vhid::kHidAllowTransparentOutput)) {
         std::cerr << "device " << id << ": HID source descriptor cannot be "
                   << "decoded for profile conversion (" << decode_error
@@ -254,7 +289,7 @@ class Runtime {
     std::lock_guard lock(mutex_);
     vhid::DeviceDescription effective_description =
         source_input_codec->description();
-    overrides_.apply(effective_description);
+    apply_description_overrides(effective_description, std::nullopt);
     auto profile_unique = vhid::make_profile(effective_description);
     if (!profile_unique) {
       std::cerr << "device " << id
@@ -264,7 +299,7 @@ class Runtime {
     auto profile =
         std::shared_ptr<vhid::HidProfile>(std::move(profile_unique));
     vhid::HidDeviceProperties properties = profile->properties();
-    overrides_.apply(properties);
+    identity_overrides_.apply(properties);
     Controller controller;
     controller.source_description = source_input_codec->description();
     controller.profile = profile;
@@ -312,10 +347,10 @@ class Runtime {
   bool add_raw(uint32_t id, const vhid::ParsedHidDeviceAdd& source,
                const Route& route) {
     std::lock_guard lock(mutex_);
-    if (overrides_.profile_set) {
+    if (output_profile_setting_) {
       std::cerr
           << "device " << id << ": --output-profile "
-          << profile_name(overrides_.profile)
+          << profile_name(*output_profile_setting_)
           << " cannot be applied to transparent HID publication; use a "
              "decoded HID source or semantic source for profile conversion\n";
       return false;
@@ -345,7 +380,7 @@ class Runtime {
       case vhid::HidTransport::network: properties.transport = "Network"; break;
       default: properties.transport = "Virtual"; break;
     }
-    overrides_.apply(properties);
+    identity_overrides_.apply(properties);
     properties.report_descriptor.assign(source.descriptor.begin(),
                                         source.descriptor.end());
     Controller controller;
@@ -382,10 +417,9 @@ class Runtime {
     std::cout << "device " << id << " removed\n";
   }
 
-  void set_output_profile(std::optional<vhid::DeviceProfile> profile) {
+  void set_output_profile(vhid::DeviceProfile profile) {
     std::lock_guard lock(mutex_);
-    overrides_.profile_set = profile.has_value();
-    if (profile) overrides_.profile = *profile;
+    output_profile_setting_ = profile;
     size_t changed = 0;
     size_t skipped = 0;
     bool failed = false;
@@ -394,19 +428,37 @@ class Runtime {
         ++skipped;
         continue;
       }
+      controller.output_profile_selection = profile;
       if (rebuild_controller(id, controller)) {
         ++changed;
       } else {
         failed = true;
       }
     }
-    std::cout << "output profile set to "
-              << (profile ? profile_name(*profile) : "source/default")
+    std::cout << "output profile set to " << profile_name(profile)
               << " (" << changed << " device";
     if (changed != 1) std::cout << 's';
     if (skipped) std::cout << ", " << skipped << " transparent skipped";
     if (failed) std::cout << ", some failed";
     std::cout << ")\n";
+  }
+
+  void set_output_profile(uint32_t id, vhid::DeviceProfile profile) {
+    std::lock_guard lock(mutex_);
+    auto found = controllers_.find(id);
+    if (found == controllers_.end()) {
+      std::cerr << "device " << id << ": not found\n";
+      return;
+    }
+    if (found->second.raw_hid) {
+      std::cerr << "device " << id
+                << ": transparent HID devices cannot change output profile\n";
+      return;
+    }
+    found->second.output_profile_selection = profile;
+    if (!rebuild_controller(id, found->second)) return;
+    std::cout << "device " << id << " output profile set to "
+              << profile_name(profile) << '\n';
   }
 
   void input(uint32_t id, uint32_t sequence,
@@ -648,15 +700,32 @@ class Runtime {
 
   bool dry_run_ = false;
   bool trace_rumble_ = false;
-  IdentityOverrides overrides_;
+  std::optional<vhid::DeviceProfile> output_profile_setting_;
+  IdentityOverrides identity_overrides_;
   std::mutex mutex_;
   std::atomic<uint32_t> output_sequence_{0};
   std::unordered_map<uint32_t, Controller> controllers_;
 
+  void apply_description_overrides(
+      vhid::DeviceDescription& description,
+      std::optional<vhid::DeviceProfile> output_profile_selection) const {
+    vhid::DeviceProfile profile;
+    if (output_profile_selection) {
+      profile = *output_profile_selection;
+    } else if (output_profile_setting_) {
+      profile = *output_profile_setting_;
+    } else {
+      profile = default_output_profile(description);
+    }
+    description.requested_profile = static_cast<uint8_t>(profile);
+    identity_overrides_.apply(description);
+  }
+
   bool rebuild_controller(uint32_t id, Controller& controller) {
     vhid::DeviceDescription effective_description =
         controller.source_description;
-    overrides_.apply(effective_description);
+    apply_description_overrides(effective_description,
+                                controller.output_profile_selection);
     auto profile_unique = vhid::make_profile(effective_description);
     if (!profile_unique) {
       std::cerr << "device " << id
@@ -666,7 +735,7 @@ class Runtime {
     auto profile =
         std::shared_ptr<vhid::HidProfile>(std::move(profile_unique));
     vhid::HidDeviceProperties properties = profile->properties();
-    overrides_.apply(properties);
+    identity_overrides_.apply(properties);
     if (controller.device && controller.profile) {
       vhid::InputState neutral{};
       std::fill(std::begin(neutral.hats), std::end(neutral.hats),
@@ -971,6 +1040,19 @@ bool parse_u16(const char* text, uint16_t& out) {
   return true;
 }
 
+bool parse_u32(const std::string& text, uint32_t& out) {
+  if (text.empty() || text[0] == '-') return false;
+  char* end = nullptr;
+  errno = 0;
+  const unsigned long value = std::strtoul(text.c_str(), &end, 0);
+  if (errno || !end || *end != '\0' ||
+      value > std::numeric_limits<uint32_t>::max()) {
+    return false;
+  }
+  out = static_cast<uint32_t>(value);
+  return true;
+}
+
 bool parse_transport(const std::string& text, std::string& out) {
   if (text == "virtual" || text == "Virtual") {
     out = "Virtual";
@@ -992,9 +1074,6 @@ bool parse_transport(const std::string& text, std::string& out) {
 bool parse_profile(const std::string& text, vhid::DeviceProfile& out) {
   if (text == "generic") {
     out = vhid::DeviceProfile::generic;
-  } else if (text == "standard-gamepad" || text == "standard_gamepad" ||
-             text == "gamepad") {
-    out = vhid::DeviceProfile::standard_gamepad;
   } else if (text == "switch-pro" || text == "switch1-pro" ||
              text == "switch-1-pro" || text == "switch-pro-controller") {
     out = vhid::DeviceProfile::switch_pro;
@@ -1005,19 +1084,6 @@ bool parse_profile(const std::string& text, vhid::DeviceProfile& out) {
   } else {
     return false;
   }
-  return true;
-}
-
-bool parse_runtime_profile(const std::string& text,
-                           std::optional<vhid::DeviceProfile>& out) {
-  if (text == "source" || text == "source/default" ||
-      text == "source-default" || text == "default") {
-    out.reset();
-    return true;
-  }
-  vhid::DeviceProfile profile;
-  if (!parse_profile(text, profile)) return false;
-  out = profile;
   return true;
 }
 
@@ -1034,12 +1100,28 @@ void handle_command_line(const std::string& line, Runtime& runtime) {
       command == "set-output-profile") {
     std::string value;
     stream >> value;
-    std::optional<vhid::DeviceProfile> profile;
-    if (value.empty() || !parse_runtime_profile(value, profile)) {
+    std::string device_value;
+    stream >> device_value;
+    vhid::DeviceProfile profile;
+    if (value.empty()) {
       std::cerr << "unknown output profile command: " << line << '\n';
       return;
     }
-    runtime.set_output_profile(profile);
+    if (device_value.empty()) {
+      if (!parse_profile(value, profile)) {
+        std::cerr << "unknown output profile command: " << line << '\n';
+        return;
+      }
+      runtime.set_output_profile(profile);
+      return;
+    }
+    uint32_t device_id = 0;
+    if (!parse_u32(value, device_id) ||
+        !parse_profile(device_value, profile)) {
+      std::cerr << "unknown output profile command: " << line << '\n';
+      return;
+    }
+    runtime.set_output_profile(device_id, profile);
     return;
   }
   std::cerr << "unknown command: " << line << '\n';
@@ -1247,8 +1329,7 @@ void usage(const char* name) {
                "       [--override-version N] [--override-product NAME]\n"
                "       [--override-manufacturer NAME] [--override-serial TEXT]\n"
                "       [--override-transport virtual|usb|bluetooth|ble|network]\n"
-               "       [--output-profile generic|standard-gamepad|switch-pro|"
-               "switch2-pro]\n";
+               "       [--output-profile generic|switch-pro|switch2-pro]\n";
 }
 
 }  // namespace
@@ -1266,6 +1347,7 @@ int main(int argc, char** argv) {
   bool seize = false;
   bool dry_run = false;
   bool trace_rumble = false;
+  std::optional<vhid::DeviceProfile> output_profile_setting;
   IdentityOverrides identity_overrides;
   for (int i = 1; i < argc; ++i) {
     const std::string argument = argv[i];
@@ -1326,11 +1408,12 @@ int main(int argc, char** argv) {
       }
       identity_overrides.transport_set = true;
     } else if (argument == "--output-profile" && i + 1 < argc) {
-      if (!parse_profile(argv[++i], identity_overrides.profile)) {
+      vhid::DeviceProfile profile;
+      if (!parse_profile(argv[++i], profile)) {
         usage(argv[0]);
         return 2;
       }
-      identity_overrides.profile_set = true;
+      output_profile_setting = profile;
     } else {
       usage(argv[0]);
       return 2;
@@ -1347,7 +1430,8 @@ int main(int argc, char** argv) {
               << listen_port << '\n';
     return 1;
   }
-  Runtime runtime(dry_run, trace_rumble, std::move(identity_overrides));
+  Runtime runtime(dry_run, trace_rumble, output_profile_setting,
+                  std::move(identity_overrides));
   UdpSession udp_source;
   std::vector<UdpSession> inbound_sessions;
   uint32_t next_network_device_id = kFirstNetworkDeviceId;

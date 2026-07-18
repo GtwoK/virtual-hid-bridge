@@ -577,6 +577,46 @@ void source_codec_profile_test() {
   assert(input_codec->profile() == vhid::DeviceProfile::generic);
 }
 
+void source_output_codec_per_device_sequence_test() {
+  vhid::OutputState rumble{};
+  rumble.low_frequency = 40000;
+  rumble.high_frequency = 50000;
+
+  auto switch1_first =
+      vhid::make_source_output_codec(vhid::DeviceProfile::switch_pro);
+  auto switch1_second =
+      vhid::make_source_output_codec(vhid::DeviceProfile::switch_pro);
+  assert(switch1_first);
+  assert(switch1_second);
+  vhid::SourceReport switch1_first_a;
+  vhid::SourceReport switch1_first_b;
+  vhid::SourceReport switch1_second_a;
+  assert(switch1_first->encode_output(rumble, switch1_first_a));
+  assert(switch1_first->encode_output(rumble, switch1_first_b));
+  assert(switch1_second->encode_output(rumble, switch1_second_a));
+  assert(switch1_first_a.report_id == 0x10);
+  assert(switch1_first_a.data[0] == 0);
+  assert(switch1_first_b.data[0] == 1);
+  assert(switch1_second_a.data[0] == 0);
+
+  auto switch2_first =
+      vhid::make_source_output_codec(vhid::DeviceProfile::switch_2_pro);
+  auto switch2_second =
+      vhid::make_source_output_codec(vhid::DeviceProfile::switch_2_pro);
+  assert(switch2_first);
+  assert(switch2_second);
+  vhid::SourceReport switch2_first_a;
+  vhid::SourceReport switch2_first_b;
+  vhid::SourceReport switch2_second_a;
+  assert(switch2_first->encode_output(rumble, switch2_first_a));
+  assert(switch2_first->encode_output(rumble, switch2_first_b));
+  assert(switch2_second->encode_output(rumble, switch2_second_a));
+  assert(switch2_first_a.report_id == 0x02);
+  assert((switch2_first_a.data[0] & 0x0F) == 0);
+  assert((switch2_first_b.data[0] & 0x0F) == 1);
+  assert((switch2_second_a.data[0] & 0x0F) == 0);
+}
+
 void switch_source_codec_test() {
   auto source_profile = vhid::make_profile(switch_description());
   assert(source_profile);
@@ -798,6 +838,79 @@ void switch2_native_udp_button_round_trip_test() {
   assert(output[6] == 0x7F);
   assert(output[7] == 0xCF);
   assert(output[8] == 0x03);
+}
+
+void switch2_to_switch1_motion_round_trip_test() {
+  auto source_profile = vhid::make_profile(switch2_description());
+  assert(source_profile);
+  vhid::HidDeviceAddHeader device{
+      .vendor_id = 0x057e,
+      .product_id = 0x2069,
+      .version_number = 0x0100,
+      .transport = static_cast<uint8_t>(vhid::HidTransport::network),
+      .source_input_profile = vhid::kHidSourceInputProfileInfer,
+      .source_output_profile = vhid::kHidSourceOutputProfileDefault,
+  };
+  const auto add = vhid::make_hid_device_add(
+      85, 1, 1000, device,
+      source_profile->properties().report_descriptor,
+      "Nintendo Switch 2 Pro Controller", "Nintendo Co., Ltd.",
+      "switch2-motion-source");
+  vhid::ParsedMessage parsed;
+  assert(vhid::parse_message(add, parsed));
+  vhid::ParsedHidDeviceAdd parsed_device;
+  assert(vhid::parse_hid_device_add(parsed.payload, parsed_device));
+  std::string error;
+  auto source_codec = vhid::make_source_input_codec(parsed_device, error);
+  assert(source_codec);
+
+  vhid::InputState stationary{};
+  std::fill(std::begin(stationary.hats), std::end(stationary.hats),
+            uint8_t{8});
+  stationary.acceleration[1] = 9.80665f;
+  const auto encoded_stationary = source_profile->encode(stationary);
+  const std::vector<uint8_t> stationary_payload(
+      encoded_stationary.begin() + 1, encoded_stationary.end());
+  const auto stationary_input = vhid::make_hid_report(
+      vhid::MessageType::hid_input_report, 85, 2, 1100,
+      vhid::HidReportType::input, 0x05, stationary_payload);
+  assert(vhid::parse_message(stationary_input, parsed));
+  vhid::ParsedHidReport parsed_report;
+  assert(vhid::parse_hid_report(parsed.payload, parsed_report));
+  vhid::InputState decoded_stationary{};
+  assert(source_codec->decode_input(parsed_report, decoded_stationary));
+
+  auto switch1_description = source_codec->description();
+  switch1_description.requested_profile =
+      static_cast<uint8_t>(vhid::DeviceProfile::switch_pro);
+  auto switch1_profile = vhid::make_profile(switch1_description);
+  assert(switch1_profile);
+  const auto switch1_stationary =
+      switch1_profile->encode(decoded_stationary);
+  assert(read_le_i16(switch1_stationary, 19) == 0);
+  assert(read_le_i16(switch1_stationary, 21) == 0);
+  assert(read_le_i16(switch1_stationary, 23) == 0);
+
+  vhid::InputState moving = stationary;
+  moving.angular_velocity[0] = 0.25f;
+  moving.angular_velocity[1] = -0.5f;
+  moving.angular_velocity[2] = 0.0f;
+  const auto encoded_moving = source_profile->encode(moving);
+  const std::vector<uint8_t> moving_payload(
+      encoded_moving.begin() + 1, encoded_moving.end());
+  const auto moving_input = vhid::make_hid_report(
+      vhid::MessageType::hid_input_report, 85, 3, 1200,
+      vhid::HidReportType::input, 0x05, moving_payload);
+  assert(vhid::parse_message(moving_input, parsed));
+  assert(vhid::parse_hid_report(parsed.payload, parsed_report));
+  vhid::InputState decoded_moving{};
+  assert(source_codec->decode_input(parsed_report, decoded_moving));
+  const auto switch1_moving = switch1_profile->encode(decoded_moving);
+  assert(read_le_i16(switch1_moving, 19) == 0);
+  assert(read_le_i16(switch1_moving, 21) <= -200);
+  assert(read_le_i16(switch1_moving, 21) >= -210);
+  assert(read_le_i16(switch1_moving, 23) <= -405);
+  assert(read_le_i16(switch1_moving, 23) >= -415);
 }
 
 void mapping_test() {
@@ -1242,9 +1355,11 @@ int main() {
   source_codec_array_button_test();
   source_codec_motion_test();
   source_codec_profile_test();
+  source_output_codec_per_device_sequence_test();
   switch_source_codec_test();
   switch2_source_codec_test();
   switch2_native_udp_button_round_trip_test();
+  switch2_to_switch1_motion_round_trip_test();
   mapping_test();
   profile_test();
   switch_profile_test();

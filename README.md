@@ -12,6 +12,7 @@ This is an early but testable foundation:
 - descriptor-backed and native-profile HID source transport over UDP on port
   `48660`
 - one logical device per sender-provided device ID
+- automatic virtual output-profile matching for recognized controller profiles
 - generated generic HID gamepads with configurable buttons, hats, axes,
   battery and HID Sensors-page motion
 - initial Switch 1 Pro Controller and Switch 2 Pro Controller output profiles
@@ -21,7 +22,7 @@ This is an early but testable foundation:
 - mapping/calibration core and unit tests
 - an entitlement-sensitive macOS virtual-device publisher for signed builds
 - a small AppKit UI that starts/stops the bridge, edits runtime settings and
-  identity overrides, and shows bridge logs/device lifecycle
+  identity fields, and shows bridge logs/device lifecycle
 
 PlayStation, Xbox and other exact output profiles, player LEDs, configuration
 persistence, authenticated networking and the full mapping UI are future
@@ -106,8 +107,7 @@ Useful options:
 --bind 0.0.0.0      Accept HID-over-UDP from trusted LAN devices
 --listen-port PORT  Listen on a custom UDP port
 --udp-source HOST   Open a UDP session to a source, HOST[:PORT]
---output-profile P  Select semantic output: generic, standard-gamepad,
-                    switch-pro, switch2-pro
+--output-profile P  Set output profile: generic, switch-pro, switch2-pro
 ```
 
 For deterministic haptics checks, build and run:
@@ -124,17 +124,13 @@ helper already running and a virtual Switch 1 Pro visible, add `--send` to send
 the same reports through macOS HID output; by default it only targets devices
 created by Virtual HID Bridge.
 
-`--output-profile` applies to physical HID sources, descriptor-backed UDP HID
-sources and semantic UDP sources. The source controller descriptor defines the
-incoming controls; the selected output profile defines the virtual controller
-macOS and games see.
+Without `--output-profile`, the bridge uses the profile advertised or inferred
+from each input controller when that output profile is implemented. If there is
+no implemented matching profile, it publishes the decoded controls as Generic
+HID. `--output-profile` sets the starting output profile for decoded physical
+HID sources, descriptor-backed UDP HID sources and semantic UDP sources.
 
-The UI's `Source/default` choice uses the source-requested profile. Descriptor-
-backed UDP HID sources currently default to the generated generic profile.
-`Generic HID` and `Standard Gamepad` both use that generated generic profile
-until `Standard Gamepad` grows a separate fixed gamepad descriptor.
-
-Virtual-device identity overrides are available from both Terminal and the UI:
+Virtual-device identity fields can be replaced from both Terminal and the UI:
 
 ```text
 --override-vendor-id N
@@ -146,16 +142,17 @@ Virtual-device identity overrides are available from both Terminal and the UI:
 --override-transport virtual|usb|bluetooth|ble|network
 ```
 
-Numbers may be decimal or `0x` hexadecimal. Blank UI fields mean “use the source
-device value or the profile default.”
+Numbers may be decimal or `0x` hexadecimal. Blank UI fields leave the source
+device or selected profile value unchanged.
 
 When attached to a terminal, press `q` then Enter to quit; `Ctrl-C` and
 `SIGTERM` also work.
 
-While the helper is running, stdin accepts `profile source`,
-`profile generic`, `profile standard-gamepad`, `profile switch-pro`, and
-`profile switch2-pro` to rebuild active decoded controllers with a different
-virtual output profile without restarting UDP sessions or physical discovery.
+While the helper is running, stdin accepts `profile generic`,
+`profile switch-pro`, and `profile switch2-pro` to rebuild active decoded
+controllers with a different virtual output profile without restarting UDP
+sessions or physical discovery. Use `profile DEVICE_ID switch-pro` to change
+one decoded controller while leaving the others alone.
 
 ## Run the UI
 
@@ -171,7 +168,7 @@ The current UI provides:
 - output profile selection, including Switch 1 and Switch 2 Pro Controller
 - live output-profile switching for decoded sources
 - optional rumble trace logging
-- VID/PID/version/product/manufacturer/serial/transport identity overrides
+- VID/PID/version/product/manufacturer/serial/transport identity fields
 - a device table and bridge log pane
 
 The UI does not yet persist profiles or edit per-button/per-axis mappings. The
@@ -215,10 +212,11 @@ There is no universal packet layout shared by USB, Bluetooth and UDP.
   velocity fields. The bridge converts source acceleration from Gs to m/s² and
   angular velocity from degrees/sec to rad/sec internally, using SDL sensor
   axes for controller-relative motion.
-- Source output reports use source-native protocols. The bridge can default a
-  known source output profile from the source input profile, or a UDP source can
-  explicitly announce one in `hid_device_add`; it does not infer rumble
-  semantics from arbitrary vendor-defined HID output reports.
+- Source output reports use source-native protocols. When a UDP source leaves
+  `source_output_profile` at `0`, the bridge derives the source feedback codec
+  from a known native source input profile; a UDP source can also explicitly
+  announce one in `hid_device_add`. The bridge does not infer rumble semantics
+  from arbitrary vendor-defined HID output reports.
 
 The C-compatible sender helpers in `include/vhid/wire.h` keep that envelope out
 of application code. A UDP sender can usually be structured as:

@@ -86,11 +86,11 @@ numeric IDs. If the requested or inferred input codec is unknown or not
 implemented, the bridge falls back to generic descriptor-backed HID input.
 
 `source_output_profile` selects the optional source-side feedback protocol.
-`0` defaults to the source input profile when that profile is known natively.
-`0xff` disables source output. Other non-zero values use the `DeviceProfile`
-numeric IDs, so a generic input descriptor can explicitly ask to receive Switch
-Pro output reports by setting this field to `2`, or Switch 2 Pro output reports
-by setting it to `3`.
+`0` derives the feedback codec from the source input profile when that profile
+is known natively. `0xff` disables source output. Other non-zero values use the
+`DeviceProfile` numeric IDs, so a generic input descriptor can explicitly ask
+to receive Switch Pro output reports by setting this field to `2`, or Switch 2
+Pro output reports by setting it to `3`.
 
 ## HID reports
 
@@ -141,8 +141,9 @@ The normal route is:
 3. encode the selected virtual output profile.
 
 The source identity and descriptor define the source-side controller type. The
-selected output profile defines the virtual device seen by macOS and games.
-Those two identities are independent.
+bridge chooses the matching virtual output profile when that profile is
+implemented; otherwise it publishes the decoded controls as Generic HID.
+Those identities are independent from the source-side feedback protocol.
 
 ## Security status
 
